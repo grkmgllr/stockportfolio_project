@@ -1,0 +1,27 @@
+# .gitignore file to not take much space in github repository
+
+# Python compilation
+__pycache__/
+*.py[cod]
+
+# Environments
+.env
+venv/
+.venv/
+
+# IDE settings
+.vscode/
+.idea/
+
+# DATASETS - Ignore the raw and processed data
+data/
+*.csv
+*.npy
+*.pt
+
+# Logs
+logs/
+wandb/
+
+# venv exclosure 
+venv/
