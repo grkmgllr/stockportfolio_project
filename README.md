@@ -105,7 +105,7 @@ Step 3: Visualization (Optional)
 Launch Jupyter to explore market regimes and volatility clusters.
 
 ```bash
-jupyter notebook notebooks/01_visualize_data.ipynb
+jupyter notebook notebooks/visualization.ipynb
 ```
 
 Step 4: Training (Local)
