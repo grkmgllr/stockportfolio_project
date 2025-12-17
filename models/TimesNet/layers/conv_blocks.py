@@ -27,4 +27,4 @@ class Inception_Block_V1(nn.Module):
 
     def forward(self, x):
         # Sum outputs of all kernels
-        return sum(conv(x) for conv in self.convs) / len(self.co
+        return sum(conv(x) for conv in self.convs) / len(self.convs)
