@@ -147,6 +147,47 @@ def get_model(model_name: str, model_params: dict, device: str) -> torch.nn.Modu
         from models.TimeMixerpp.TimeMixerpp import TimeMixerPlusPlus
         # TimeMixer++ uses MRTI/TID instead of decomposition params
         model = TimeMixerPlusPlus(**base_params)
+    elif model_name == 'TimesNet':
+        from models.TimesNet.TimesNet import Model as TimesNet
+        # TimesNet uses config-style parameters
+        class TimesNetConfig:
+            def __init__(self, params):
+                self.seq_len = params['seq_len']
+                self.pred_len = params['pred_len']
+                self.enc_in = params['enc_in']
+                self.c_out = params['c_out']
+                self.d_model = params['d_model']
+                self.d_ff = params['d_ff']
+                self.e_layers = params['e_layers']
+                self.dropout = params['dropout']
+                self.top_k = params['top_k']
+                self.num_kernels = params['num_kernels']
+                self.embed = params['embed']
+                self.freq = params['freq']
+                self.task_name = 'long_term_forecast'
+        config = TimesNetConfig(model_params)
+        model = TimesNet(config)
+    elif model_name == 'ModernTCN':
+        from models.ModernTCN.ModernTCN import ModernTCN
+        # ModernTCN specific parameters
+        moderntcn_params = {
+            'seq_len': model_params['seq_len'],
+            'pred_len': model_params['pred_len'],
+            'enc_in': model_params['enc_in'],
+            'c_out': model_params['c_out'],
+            'd_model': model_params['d_model'],
+            'd_ff': model_params['d_ff'],
+            'e_layers': model_params['e_layers'],
+            'dropout': model_params['dropout'],
+            'patch_size': model_params['patch_size'],
+            'stride': model_params['stride'],
+            'kernel_size': model_params['kernel_size'],
+            'use_multi_scale': model_params['use_multi_scale'],
+            'use_revin': model_params['use_revin'],
+            'time_feat_dim': model_params['time_feat_dim'],
+            'head_type': model_params['head_type'],
+        }
+        model = ModernTCN(**moderntcn_params)
     else:
         raise ValueError(f"Unknown model: {model_name}")
     

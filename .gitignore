@@ -3,25 +3,41 @@
 # Python compilation
 __pycache__/
 *.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
 
 # Environments
 .env
+.env.local
 venv/
 .venv/
 
 # IDE settings
 .vscode/
 .idea/
+.cursor/
 
 # DATASETS - Ignore the raw and processed data
 data/
 *.csv
 *.npy
+
+# Model checkpoints
+checkpoints/
 *.pt
+*.pth
+*.ckpt
+
+# Jupyter notebooks
+.ipynb_checkpoints/
 
 # Logs
 logs/
 wandb/
+tensorboard/
 
-# venv exclosure 
-venv/
+# OS-specific
+.DS_Store
+Thumbs.db

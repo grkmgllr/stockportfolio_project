@@ -5,8 +5,10 @@ class TimeImageDecomposition(nn.Module):
     """
     TID: Decomposes 2D Time Images into Season and Trend Images.
     Uses 2D Average Pooling to capture 'Image Trend'.
+    
+    Larger kernel sizes capture smoother trends (better for longer patterns).
     """
-    def __init__(self, kernel_size=(3, 3)):
+    def __init__(self, kernel_size=(5, 5)):
         super().__init__()
         # We use odd kernel sizes to maintain symmetry
         # Padding handles borders so output size == input size

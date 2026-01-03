@@ -32,6 +32,14 @@ class ModelConfig:
     num_kernels: int = 6                 # Number of kernels for Inception block
     embed: str = "timeF"                 # Embedding type: 'timeF', 'fixed', 'learned'
     freq: str = "h"                      # Frequency: 's'=secondly, 'h'=hourly, 'd'=daily
+    
+    # ModernTCN specific
+    patch_size: int = 8                  # Patch size for embedding
+    stride: int = 8                      # Stride for patch embedding
+    kernel_size: int = 51                # Large kernel size for DWConv
+    use_multi_scale: bool = False        # Use multi-scale DWConv
+    use_revin: bool = True               # Use reversible instance normalization
+    head_type: str = "linear"            # Head type: 'linear' or 'forecast'
 
 
 @dataclass
@@ -67,8 +75,8 @@ class Config:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     data: DataConfig = field(default_factory=DataConfig)
     
-    # Model selection: 'TimeMixer', 'TimeMixer++', or 'TimesNet'
-    model_name: Literal["TimeMixer", "TimeMixer++", "TimesNet"] = "TimeMixer++"
+    # Model selection: 'TimeMixer', 'TimeMixer++', 'TimesNet', or 'ModernTCN'
+    model_name: Literal["TimeMixer", "TimeMixer++", "TimesNet", "ModernTCN"] = "TimeMixer++"
     
     # Paths
     checkpoint_dir: str = "checkpoints"
@@ -118,6 +126,13 @@ class Config:
             'num_kernels': self.model.num_kernels,
             'embed': self.model.embed,
             'freq': self.model.freq,
+            # ModernTCN specific
+            'patch_size': self.model.patch_size,
+            'stride': self.model.stride,
+            'kernel_size': self.model.kernel_size,
+            'use_multi_scale': self.model.use_multi_scale,
+            'use_revin': self.model.use_revin,
+            'head_type': self.model.head_type,
         }
 
 
