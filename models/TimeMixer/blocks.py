@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from .decomposition import SeriesDecomposition
+from .timemixer import TimeMixerConfig
 
 ActivationName = Literal["gelu"]
 
@@ -25,18 +26,15 @@ class TemporalLinearMixer(nn.Module):
     """
     def __init__(
         self,
+        config: "TimeMixerConfig",
         input_length: int,
         output_length: int,
         hidden_dim: Optional[int] = None,
-        dropout: float = 0.0,
-        activation: ActivationName = "gelu",
     ) -> None:
         super().__init__()
 
         if input_length < 1 or output_length < 1:
             raise ValueError("input_length and output_length must be >= 1")
-        if not (0.0 <= dropout < 1.0):
-            raise ValueError("dropout must be in [0.0, 1.0).")
         
         self.input_length = input_length
         self.output_length = output_length
@@ -44,8 +42,8 @@ class TemporalLinearMixer(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(input_length, hidden),
-            makeActivation(activation),
-            nn.Dropout(dropout),
+            makeActivation(config.activation_function_name),
+            nn.Dropout(config.dropout_probability),
             nn.Linear(hidden, output_length),
         )
 
@@ -73,29 +71,25 @@ class MultiscaleSeasonMixing(nn.Module):
     """
     def __init__(
         self,
-        input_lengths: List[int],
+        config: "TimeMixerConfig",
         hidden_dim: Optional[int] = None,
-        dropout: float = 0.0,
-        activation: ActivationName = "gelu",
     ) -> None:
         super().__init__()
 
-        if len(input_lengths) < 2:
+        self.input_lengths = config.get_multiscale_input_lengths()
+        if len(self.input_lengths) < 2:
             raise ValueError("MultiscaleSeasonMixing requires at least 2 scales.")
         
-        self.input_lengths = input_lengths
-
         mixers: List[nn.Module] = []
-        for i in range(len(input_lengths) - 1):
-            t_in = input_lengths[i]
-            t_out = input_lengths[i + 1]
+        for i in range(len(self.input_lengths) - 1):
+            t_in = self.input_lengths[i]
+            t_out = self.input_lengths[i + 1]
             mixers.append(
                 TemporalLinearMixer(
+                    config=config,
                     input_length=t_in,
                     output_length=t_out,
                     hidden_dim=hidden_dim,
-                    dropout=dropout,
-                    activation=activation,
                 )
             )
         self.down_mixers = nn.ModuleList(mixers)
@@ -140,31 +134,27 @@ class MultiscaleTrendMixing(nn.Module):
 
     def __init__(
         self,
-        input_lengths: List[int],
+        config: "TimeMixerConfig",
         hidden_dim: Optional[int] = None,
-        dropout: float = 0.0,
-        activation: ActivationName = "gelu",
     ) -> None:
         super().__init__()
 
-        if len(input_lengths) < 2:
+        self.input_lengths = config.get_multiscale_input_lengths()
+        if len(self.input_lengths) < 2:
             raise ValueError("MultiscaleTrendMixing requires at least 2 scales.")
-
-        self.input_lengths = input_lengths
 
         # coarse -> fine:
         # for adjacent pair (i, i+1): map T_{i+1} -> T_i
         mixers: List[nn.Module] = []
-        for i in reversed(range(len(input_lengths) - 1)):
-            t_coarse = input_lengths[i + 1]
-            t_fine = input_lengths[i]
+        for i in reversed(range(len(self.input_lengths) - 1)):
+            t_coarse = self.input_lengths[i + 1]
+            t_fine = self.input_lengths[i]
             mixers.append(
                 TemporalLinearMixer(
+                    config=config,
                     input_length=t_coarse,
                     output_length=t_fine,
                     hidden_dim=hidden_dim,
-                    dropout=dropout,
-                    activation=activation,
                 )
             )
 
@@ -214,4 +204,104 @@ class PastDecomposableMixing(nn.Module):
 
     I/O: x_list (len=M+1), x_i [B, T_i, D] -> out_list, out_i [B, T_i, D]   
     """
-    # TODO: complete PDM block implementation
+    def __init__(self, config: TimeMixerConfig) -> None:
+        super().__init__()
+        self.config = config
+
+        self.input_lengths = config.get_multiscale_input_lengths()
+        self.model_embedding_dimension = config.model_embedding_dimension
+        self.feedforward_hidden_dimension = config.feedforward_hidden_dimension
+        self.dropout_probability = config.dropout_probability
+        self.use_channel_independence = config.use_channel_independence
+        self.use_output_residual_connection = config.use_output_residual_connection
+
+
+        if config.decomposition_method_name != "moving_average":
+            raise NotImplementedError(
+                "our implementation only has moving_average decomposition. "
+            )
+        
+        self.decomposition = SeriesDecomposition(
+            kernel_size=config.moving_average_kernel_size,
+            padding_mode=config.moving_average_padding_mode,
+            center=config.moving_average_centered,
+            validate_shapes=True,
+        )
+
+        # if channels are not independent allow interaction across feature dimension before mixing
+        if not self.use_channel_independence:
+            self.pre_mix_channel_ffn = nn.Sequential(
+                nn.Linear(self.model_embedding_dimension, self.feedforward_hidden_dimension),
+                makeActivation(config.activation_function_name),
+                nn.Dropout(self.dropout_probability),
+                nn.Linear(self.feedforward_hidden_dimension, self.model_embedding_dimension),
+            )
+        else:
+            self.pre_mix_channel_ffn = None
+
+        # mixing
+        self.season_mixer = MultiscaleSeasonMixing(
+            config=self.config,
+            hidden_dim=None,
+        )
+
+        self.trend_mixer = MultiscaleTrendMixing(
+            config=self.config,
+            hidden_dim=None,
+        )
+
+        self.post_mix_ffn = nn.Sequential(
+            nn.Linear(self.model_embedding_dimension, self.feedforward_hidden_dimension),
+            makeActivation(config.activation_function_name),
+            nn.Dropout(self.dropout_probability),
+            nn.Linear(self.feedforward_hidden_dimension, self.model_embedding_dimension),
+        )
+
+        self.output_layer_norm = nn.LayerNorm(self.model_embedding_dimension)
+
+    def forward(self, x_list: List[torch.Tensor]) -> List[torch.Tensor]:
+        if len(x_list) != len(self.input_lengths):
+            raise ValueError(
+                f"Expected {len(self.input_lengths)} scales, got {len(x_list)}."
+            )
+
+        # shape checks
+        for i, (x, expected_t) in enumerate(zip(x_list, self.input_lengths)):
+            if x.ndim != 3:
+                raise ValueError(f"Scale {i} expected [B, T, D], got {tuple(x.shape)}.")
+            if x.shape[1] != expected_t:
+                raise ValueError(f"Scale {i} expected T={expected_t}, got T={x.shape[1]}.")
+            if x.shape[2] != self.model_embedding_dimension:
+                raise ValueError(
+                    f"Scale {i} expected D={self.model_embedding_dimension}, got D={x.shape[2]}."
+                )
+
+        # Decompose each scale: x = season + trend
+        seasonal_components: List[torch.Tensor] = []
+        trend_components: List[torch.Tensor] = []
+        for x in x_list:
+            season, trend = self.decomposition(x)
+
+            if self.pre_mix_channel_ffn is not None:
+                season = self.pre_mix_channel_ffn(season)
+                trend = self.pre_mix_channel_ffn(trend)
+
+            seasonal_components.append(season)
+            trend_components.append(trend)
+
+        # Multiscale mixing
+        mixed_season = self.season_mixer(seasonal_components)  # fine -> coarse
+        mixed_trend = self.trend_mixer(trend_components)       # coarse -> fine
+
+        # Fuse back per scale
+        out_list: List[torch.Tensor] = []
+        for original_x, season_x, trend_x in zip(x_list, mixed_season, mixed_trend):
+            fused = season_x + trend_x  
+
+            if self.use_output_residual_connection:
+                fused = original_x + self.post_mix_ffn(fused)
+
+            fused = self.output_layer_norm(fused)
+            out_list.append(fused)
+
+        return out_list
