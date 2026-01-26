@@ -6,7 +6,11 @@ import torch
 import torch.nn as nn
 
 from .decomposition import SeriesDecomposition
-from .timemixer import TimeMixerConfig
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .timemixer import TimeMixerConfig
+
 
 ActivationName = Literal["gelu"]
 
@@ -204,7 +208,7 @@ class PastDecomposableMixing(nn.Module):
 
     I/O: x_list (len=M+1), x_i [B, T_i, D] -> out_list, out_i [B, T_i, D]   
     """
-    def __init__(self, config: TimeMixerConfig) -> None:
+    def __init__(self, config: "TimeMixerConfig") -> None:
         super().__init__()
         self.config = config
 
