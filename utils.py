@@ -167,6 +167,27 @@ def get_model(model_name: str, model_params: dict, device: str) -> torch.nn.Modu
                 self.task_name = 'long_term_forecast'
         config = TimesNetConfig(model_params)
         model = TimesNet(config)
+    elif model_name == 'TimesNetPure':
+        from models.TimesNetPure.model import TimesNetModel, TimesNetConfig
+
+        cfg = TimesNetConfig(
+            task_name='long_term_forecast',
+            seq_len=model_params['seq_len'],
+            label_len=0,
+            pred_len=model_params['pred_len'],
+            enc_in=model_params['enc_in'],
+            c_out=model_params['c_out'],
+            d_model=model_params['d_model'],
+            d_ff=model_params['d_ff'],
+            e_layers=model_params['e_layers'],
+            top_k=model_params.get('top_k', 2),
+            num_kernels=model_params.get('num_kernels', 6),
+            embed=model_params.get('embed', 'fixed'),
+            freq=model_params.get('freq', 'h'),
+            dropout=model_params['dropout'],
+        )
+
+        model = TimesNetModel(cfg)
     elif model_name == 'ModernTCN':
         from models.ModernTCN.ModernTCN import ModernTCN
         # ModernTCN specific parameters

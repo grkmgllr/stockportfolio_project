@@ -74,9 +74,9 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     data: DataConfig = field(default_factory=DataConfig)
-    
-    # Model selection: 'TimeMixer', 'TimeMixer++', 'TimesNet', or 'ModernTCN'
-    model_name: Literal["TimeMixer", "TimeMixer++", "TimesNet", "ModernTCN"] = "TimeMixer++"
+
+    # Model selection: 'TimeMixer', 'TimeMixer++', 'TimesNetPure', or 'ModernTCN'
+    model_name: Literal["TimeMixer", "TimeMixer++", "TimesNetPure", "ModernTCN"] = "TimeMixer++"
     
     # Paths
     checkpoint_dir: str = "checkpoints"

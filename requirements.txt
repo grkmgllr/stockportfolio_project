@@ -6,3 +6,5 @@ matplotlib
 tqdm
 jupyter
 seaborn
+beartype
+torchtyping
