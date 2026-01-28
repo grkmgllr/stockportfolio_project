@@ -1,1 +1,3 @@
-from .model import TimesNetModel, TimesNetConfig
+from .model import TimesNetForecastModel, TimesNetForecastConfig
+
+__all__ = ["TimesNetForecastModel", "TimesNetForecastConfig"]

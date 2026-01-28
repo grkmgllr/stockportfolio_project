@@ -1,49 +1,84 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as f
 
 from ..base import ForecastModel
 from .blocks import TimesBlock
 from .layers import DataEmbedding
 
 
-@dataclass
-class TimesNetConfig:
-    """Minimal config for this TimesNet port."""
+@dataclass(frozen=True)
+class TimesNetForecastConfig:
+    """
+    Configuration for TimesNet forecasting model.
 
-    task_name: str = (
-        "long_term_forecast"  # {"long_term_forecast","short_term_forecast","imputation","anomaly_detection","classification"}
-    )
+    This project uses TimesNet ONLY for forecasting (no classification,
+    anomaly detection, or imputation). Keep this config minimal and
+    focused on the forecasting task.
+    """
+    # Task lengths
     seq_len: int = 96
-    label_len: int = 0
     pred_len: int = 96
-    enc_in: int = 1
-    c_out: int = 1
+
+    # Input / output channels
+    enc_in: int = 7
+    c_out: int = 7
+
+    # Model dimensions
     d_model: int = 64
     d_ff: int = 256
     e_layers: int = 3
+
+    # TimesNet-specific
     top_k: int = 2
     num_kernels: int = 6
-    embed: str = "fixed"
+
+    # Embedding
+    embed: str = "fixed"   # "fixed" or "timeF" etc.
     freq: str = "h"
+
+    # Regularization
     dropout: float = 0.1
-    num_class: int = 2
+
+    # Numerical stability
+    eps: float = 1e-5
 
 
-class TimesNetModel(ForecastModel):
-    """TimesNet wrapper with unified tasks; inputs/outputs use [b, t, c]."""
+class TimesNetForecastModel(ForecastModel):
+    """
+    TimesNet model for forecasting only.
 
-    def __init__(self, cfg: TimesNetConfig):
+    Inputs:
+        x:      Tensor [batch, seq_len, enc_in]
+        x_mark: Optional time features [batch, seq_len, k] (can be None)
+
+    Outputs:
+        y_pred: Tensor [batch, pred_len, c_out]
+    """
+
+    def __init__(self, cfg: TimesNetForecastConfig):
         super().__init__()
         self.cfg = cfg
-        self.seq_len = cfg.seq_len
-        self.pred_len = cfg.pred_len
         self.total_len = cfg.seq_len + cfg.pred_len
 
+        # Embedding: [b,t,c] -> [b,t,d_model]
+        self.enc_embedding = DataEmbedding(
+            c_in=cfg.enc_in,
+            d_model=cfg.d_model,
+            embed=cfg.embed,
+            freq=cfg.freq,
+            dropout=cfg.dropout,
+        )
+
+        # Align time dimension from seq_len -> (seq_len + pred_len)
+        # Operates on the TIME dimension (after transpose).
+        self.align_time = nn.Linear(cfg.seq_len, self.total_len)
+
+        # TimesNet blocks
         self.blocks = nn.ModuleList(
             [
                 TimesBlock(
@@ -55,134 +90,87 @@ class TimesNetModel(ForecastModel):
                 for _ in range(cfg.e_layers)
             ]
         )
-        self.enc_embedding = DataEmbedding(
-            cfg.enc_in, cfg.d_model, cfg.embed, cfg.freq, cfg.dropout
-        )
+
         self.norm = nn.LayerNorm(cfg.d_model)
 
-        if cfg.task_name in {"long_term_forecast", "short_term_forecast"}:
-            self.align_time = nn.Linear(cfg.seq_len, self.total_len)
-            self.proj = nn.Linear(cfg.d_model, cfg.c_out, bias=True)
-        elif cfg.task_name in {"imputation", "anomaly_detection"}:
-            self.proj = nn.Linear(cfg.d_model, cfg.c_out, bias=True)
-        elif cfg.task_name == "classification":
-            self.act = f.gelu
-            self.drop = nn.Dropout(cfg.dropout)
-            self.proj = nn.Linear(cfg.d_model * cfg.seq_len, cfg.num_class)
-        else:
-            raise ValueError(f"Unknown task_name={cfg.task_name}")
+        # Project back to output channels
+        self.proj = nn.Linear(cfg.d_model, cfg.c_out, bias=True)
 
-    # ---- helpers ----
+    # -------------------------
+    # Normalization helpers
+    # -------------------------
 
-    def _norm_ns_transformer(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Per-batch normalization as used in the original implementation."""
-        means = x.mean(1, keepdim=True).detach()  # [b,1,c]
-        x_norm = x - means
-        stdev = torch.sqrt(x_norm.var(dim=1, keepdim=True, unbiased=False) + 1e-5)
-        x_norm = x_norm / stdev
-        return x_norm, means, stdev
+    def _normalize(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Normalize per-sample across time (NS-Transformer style).
 
-    def _denorm_ns_transformer(
-        self, y: torch.Tensor, means: torch.Tensor, stdev: torch.Tensor
-    ) -> torch.Tensor:
-        return y * stdev[:, 0, :].unsqueeze(1) + means[:, 0, :].unsqueeze(1)
+        Args:
+            x: [b, t, c]
 
-    # ---- tasks ----
+        Returns:
+            x_norm: [b, t, c]
+            mean:   [b, 1, c]
+            std:    [b, 1, c]
+        """
+        mean = x.mean(dim=1, keepdim=True).detach()
+        x0 = x - mean
+        std = torch.sqrt(x0.var(dim=1, keepdim=True, unbiased=False) + self.cfg.eps)
+        x_norm = x0 / std
+        return x_norm, mean, std
 
-    def forecast(
-        self,
-        x_enc: torch.Tensor,
-        x_mark_enc: torch.Tensor | None,
-        x_dec: torch.Tensor | None,
-        x_mark_dec: torch.Tensor | None,
-    ) -> torch.Tensor:
-        x_norm, means, stdev = self._norm_ns_transformer(x_enc)
-        enc = self.enc_embedding(x_norm, x_mark_enc)  # [b,t,d]
-        enc = self.align_time(enc.transpose(1, 2)).transpose(1, 2)  # [b,t_total,d]
+    def _denormalize(self, y: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+        """
+        Undo _normalize.
+
+        Args:
+            y:    [b, t, c]
+            mean: [b, 1, c]
+            std:  [b, 1, c]
+        """
+        return y * std + mean
+
+    # -------------------------
+    # Forecasting
+    # -------------------------
+
+    def forward(self, x: torch.Tensor, x_mark: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Run TimesNet forecasting.
+
+        Args:
+            x:      [b, seq_len, enc_in]
+            x_mark: Optional [b, seq_len, k] time features (can be None)
+
+        Returns:
+            [b, pred_len, c_out] predictions in the ORIGINAL scale
+            (after denormalization).
+        """
+        if x.dim() != 3:
+            raise ValueError(f"Expected x shape [b,t,c], got {tuple(x.shape)}")
+        if x.size(1) != self.cfg.seq_len:
+            raise ValueError(
+                f"Expected seq_len={self.cfg.seq_len}, got t={x.size(1)}. "
+                "Ensure dataset uses the same seq_len as config."
+            )
+
+        # 1) normalize
+        x_norm, mean, std = self._normalize(x)
+
+        # 2) embed
+        enc = self.enc_embedding(x_norm, x_mark)  # [b, seq_len, d_model]
+
+        # 3) time alignment: [b, seq_len, d] -> [b, total_len, d]
+        enc = self.align_time(enc.transpose(1, 2)).transpose(1, 2)
+
+        # 4) TimesBlocks
         for blk in self.blocks:
             enc = self.norm(blk(enc, self.total_len))
-        y = self.proj(enc)  # [b,t_total,c]
-        return self._denorm_ns_transformer(y, means, stdev)
 
-    def anomaly_detection(self, x_enc: torch.Tensor) -> torch.Tensor:
-        x_norm, means, stdev = self._norm_ns_transformer(x_enc)
-        enc = self.enc_embedding(x_norm, None)
-        for blk in self.blocks:
-            enc = self.norm(blk(enc, self.total_len))
+        # 5) project: [b, total_len, c_out]
         y = self.proj(enc)
-        return self._denorm_ns_transformer(y, means, stdev)
 
-    def classification(
-        self,
-        x_enc: torch.Tensor,
-        x_mark_enc: torch.Tensor | None,
-    ) -> torch.Tensor:
-        enc = self.enc_embedding(x_enc, None)
-        for blk in self.blocks:
-            enc = self.norm(blk(enc, self.total_len))
-        out = self.drop(self.act(enc))  # [b,t,d]
+        # 6) denormalize back to original scale
+        y = self._denormalize(y, mean, std)
 
-        # padding mask: [b,t] or [b,t,1] → [b,t,1]; default all-ones
-        if x_mark_enc is None:
-            pad_mask = torch.ones(out.size(0), out.size(1), 1, device=out.device, dtype=out.dtype)
-        else:
-            if x_mark_enc.dim() == 2:
-                pad_mask = x_mark_enc.unsqueeze(-1).to(dtype=out.dtype)
-            elif x_mark_enc.dim() == 3 and x_mark_enc.size(-1) == 1:
-                pad_mask = x_mark_enc.to(dtype=out.dtype)
-            else:
-                raise ValueError(
-                    f"Expected x_mark_enc shape [b,t] or [b,t,1], got {tuple(x_mark_enc.shape)}"
-                )
-
-        out = (out * pad_mask).reshape(out.size(0), -1)  # [b,t*d]
-        return self.proj(out)  # [b,num_class]
-
-    def imputation(
-        self,
-        x_enc: torch.Tensor,
-        x_mark_enc: torch.Tensor | None,
-        x_dec: torch.Tensor | None,
-        x_mark_dec: torch.Tensor | None,
-        mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        if mask is None:
-            mask = torch.ones_like(x_enc)  # [b,t,c]
-        elif mask.shape != x_enc.shape:
-            raise ValueError(f"Expected mask shape {tuple(x_enc.shape)}, got {tuple(mask.shape)}")
-
-        means = (x_enc.sum(dim=1) / (mask == 1).sum(dim=1)).unsqueeze(1).detach()  # [b,1,c]
-        x0 = (x_enc - means).masked_fill(mask == 0, 0.0)
-        stdev = (
-            torch.sqrt((x0 * x0).sum(dim=1) / (mask == 1).sum(dim=1) + 1e-5).unsqueeze(1).detach()
-        )
-        x = x0 / stdev
-
-        enc = self.enc_embedding(x, x_mark_enc)
-        for blk in self.blocks:
-            enc = self.norm(blk(enc, self.total_len))
-        y = self.proj(enc)
-        return y * stdev[:, 0, :].unsqueeze(1) + means[:, 0, :].unsqueeze(1)
-
-    # ---- required by ForecastModel ----
-    def forward(
-        self,
-        x_enc: torch.Tensor,
-        x_mark_enc: torch.Tensor | None = None,
-        x_dec: torch.Tensor | None = None,
-        x_mark_dec: torch.Tensor | None = None,
-        mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        t = self.cfg.task_name
-        if t in {"long_term_forecast", "short_term_forecast"}:
-            y = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
-            return y[:, -self.cfg.pred_len :, :]  # [b,pred_len,c]
-        if t == "imputation":
-            return self.imputation(x_enc, x_mark_enc, x_dec, x_mark_dec, mask)
-        if t == "anomaly_detection":
-            return self.anomaly_detection(x_enc)
-        if t == "classification":
-            return self.classification(x_enc, x_mark_enc)
-        raise RuntimeError(f"Unhandled task_name={t}")
+        # 7) return only forecast horizon
+        return y[:, -self.cfg.pred_len :, :]

@@ -76,7 +76,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
 
     # Model selection: 'TimeMixer', 'TimeMixer++', 'TimesNetPure', or 'ModernTCN'
-    model_name: Literal["TimeMixer", "TimeMixer++", "TimesNetPure", "ModernTCN"] = "TimeMixer++"
+    model_name: Literal["TimeMixer", "TimeMixer++", "TimesNetPure", "ModernTCN"] = "TimesNetPure"
     
     # Paths
     checkpoint_dir: str = "checkpoints"

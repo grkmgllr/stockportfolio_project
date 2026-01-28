@@ -168,12 +168,15 @@ def get_model(model_name: str, model_params: dict, device: str) -> torch.nn.Modu
         config = TimesNetConfig(model_params)
         model = TimesNet(config)
     elif model_name == 'TimesNetPure':
-        from models.TimesNetPure.model import TimesNetModel, TimesNetConfig
+        """
+        TimesNetPure (forecasting-only) model.
+        Uses a minimal dataclass config and a simplified forward API:
+        model(x, x_mark=None) -> [b, pred_len, c_out]
+        """
+        from models.TimesNetPure.model import TimesNetForecastModel, TimesNetForecastConfig
 
-        cfg = TimesNetConfig(
-            task_name='long_term_forecast',
+        cfg = TimesNetForecastConfig(
             seq_len=model_params['seq_len'],
-            label_len=0,
             pred_len=model_params['pred_len'],
             enc_in=model_params['enc_in'],
             c_out=model_params['c_out'],
@@ -187,7 +190,8 @@ def get_model(model_name: str, model_params: dict, device: str) -> torch.nn.Modu
             dropout=model_params['dropout'],
         )
 
-        model = TimesNetModel(cfg)
+        model = TimesNetForecastModel(cfg)
+
     elif model_name == 'ModernTCN':
         from models.ModernTCN.ModernTCN import ModernTCN
         # ModernTCN specific parameters
