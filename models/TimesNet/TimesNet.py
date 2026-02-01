@@ -89,7 +89,35 @@ class TimesBlock(nn.Module):
 
 
 class Model(nn.Module):
+"""    
+    Key components:
+---------------
+    1. Period Detection (Frequency Analysis):
+       - The dominant periods are extracted using Fast Fourier Transform (FFT).
+       - The top-K frequencies with the largest amplitudes are selected.
+       - Each frequency corresponds to a candidate period:
+         P_k = T / f_k
+         where T is the sequence length and f_k is the k-th dominant frequency.
 
+    2. 2D Temporal Reshaping:
+       - Given a detected period P, the input sequence X ∈ R^{T×C} is padded
+         (if necessary) and reshaped into:
+         X_2D ∈ R^{(T/P) × P × C}
+       - One axis represents variations within a period (intra-period),
+         and the other represents variations across periods (inter-period).
+
+    3. 2D processing in TimesBlock:
+       - Each TimesBlock applies lightweight inception-style 2D convolutional layers to the
+         reshaped representation 
+       - After convolution, the output is reshaped back to the original 1D temporal format.
+
+    4. Adaptive Period Aggregation:
+       - Outputs from multiple detected periods are aggregated using
+         learnable weights derived from frequency amplitudes.
+       - This enables the model to adaptively focus on the most informative
+         temporal patterns.
+
+    """
     def __init__(self, configs):
         super().__init__()
         self.task_name = configs.task_name
