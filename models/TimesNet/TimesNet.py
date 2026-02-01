@@ -89,9 +89,9 @@ class TimesBlock(nn.Module):
 
 
 class Model(nn.Module):
-"""    
+    """    
     Key components:
----------------
+    ---------------
     1. Period Detection (Frequency Analysis):
        - The dominant periods are extracted using Fast Fourier Transform (FFT).
        - The top-K frequencies with the largest amplitudes are selected.
