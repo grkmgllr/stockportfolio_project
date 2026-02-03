@@ -2,7 +2,7 @@
 Yahoo Finance Dataset for stock price forecasting.
 
 Input: OHLCV (Open, High, Low, Close, Volume) - 5 features
-Output: High, Low predictions - 2 features
+Output: High, Close predictions - 2 features
 """
 import torch
 from torch.utils.data import Dataset
@@ -17,16 +17,16 @@ class YahooDataset(Dataset):
     """
     Dataset for Yahoo Finance stock data.
     
-    Predicts High and Low prices from OHLCV input for short-term forecasting.
+    Predicts High and Close prices from OHLCV input for short-term forecasting.
     Uses date-based splits for proper time series handling.
     
     Input features: Open, High, Low, Close, Volume (5 features)
-    Output targets: High, Low (2 features)
+    Output targets: High, Close (2 features)
     """
     
     # Column names in Yahoo Finance data
     OHLCV_COLUMNS = ['Open', 'High', 'Low', 'Close', 'Volume']
-    DEFAULT_TARGETS = ['High', 'Low']
+    DEFAULT_TARGETS = ['High', 'Close']
     
     def __init__(
         self,
@@ -34,7 +34,7 @@ class YahooDataset(Dataset):
         root_path: str = 'data/raw',
         flag: Literal['train', 'val', 'test'] = 'train',
         seq_len: int = 30,
-        pred_len: int = 5,
+        pred_len: int = 1,
         input_features: Optional[List[str]] = None,
         target_features: Optional[List[str]] = None,
         scale: bool = True,
@@ -49,7 +49,7 @@ class YahooDataset(Dataset):
             seq_len: Length of input sequence (lookback window)
             pred_len: Length of prediction horizon
             input_features: List of input feature columns (default: OHLCV)
-            target_features: List of target columns to predict (default: High, Low)
+            target_features: List of target columns to predict (default: High, Close)
             scale: Whether to apply StandardScaler
             train_ratio: Ratio of data for training (default: 0.7)
             val_ratio: Ratio of data for validation (default: 0.15)
@@ -183,7 +183,7 @@ class YahooDataset(Dataset):
         return self.scaler_x.inverse_transform(data)
     
     def inverse_transform_y(self, data: np.ndarray) -> np.ndarray:
-        """Inverse transform target features (High, Low) back to original scale."""
+        """Inverse transform target features (High, Close) back to original scale."""
         return self.scaler_y.inverse_transform(data)
     
     @property

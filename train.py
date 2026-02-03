@@ -1,6 +1,6 @@
 """
 Training script for stock price forecasting.
-Predicts High/Low from OHLCV data using TimeMixer or TimesNetPure.
+Predicts High/Close from OHLCV data using TimeMixer or TimesNetPure.
 
 Usage:
     python train.py --ticker AAPL
@@ -32,7 +32,7 @@ class TrainingConfig:
     Training configuration for stock price forecasting.
     
     Contains all hyperparameters and settings for training a model
-    to predict High/Low prices from OHLCV input data.
+    to predict High/Close prices from OHLCV input data.
     
     Attributes:
         model_name: Model architecture ('TimeMixer' or 'TimesNetPure')
@@ -57,7 +57,7 @@ class TrainingConfig:
     ticker: str = "AAPL"
     data_root: str = "data/raw"
     seq_len: int = 30       # 30 days lookback
-    pred_len: int = 5       # 5 days forecast
+    pred_len: int = 1       # 5 days forecast
     
     # Training hyperparameters
     batch_size: int = 32
@@ -84,14 +84,14 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int):
     Get model config for Yahoo stock prediction.
     
     Input: OHLCV (5 features)
-    Output: High, Low (2 features)
+    Output: High, Close (2 features)
     """
     if model_name == "TimesNetPure":
         return TimesNetForecastConfig(
             seq_len=seq_len,
             pred_len=pred_len,
             enc_in=5,       # OHLCV
-            c_out=2,        # High, Low
+            c_out=2,        # High, Close
             d_model=32,
             d_ff=64,
             e_layers=2,
@@ -107,7 +107,7 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int):
             historical_lookback_length=seq_len,
             forecast_horizon_length=pred_len,
             number_of_input_features=5,     # OHLCV
-            number_of_output_features=2,    # High, Low
+            number_of_output_features=2,    # High, Close
             model_embedding_dimension=64,
             feedforward_hidden_dimension=128,
             number_of_pdm_blocks=2,
@@ -137,9 +137,9 @@ def print_config(train_cfg: TrainingConfig, model_cfg) -> None:
     print(f"Ticker: {train_cfg.ticker}")
     print(f"Model: {train_cfg.model_name}")
     print(f"Device: {train_cfg.device}")
-    print(f"\nTask: Predict High/Low from OHLCV")
+    print(f"\nTask: Predict High/Close from OHLCV")
     print(f"  Input:  OHLCV ({model_cfg.enc_in} features)")
-    print(f"  Output: High, Low ({model_cfg.c_out} features)")
+    print(f"  Output: High, Close ({model_cfg.c_out} features)")
     print(f"  Lookback: {model_cfg.seq_len} days")
     print(f"  Forecast: {model_cfg.pred_len} days")
     print(f"\nTraining:")
@@ -197,7 +197,7 @@ def validate_epoch(model, val_loader, criterion, device):
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Train stock price forecasting model (predict High/Low from OHLCV)"
+        description="Train stock price forecasting model (predict High/Close from OHLCV)"
     )
 
     # Required

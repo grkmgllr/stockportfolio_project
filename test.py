@@ -1,6 +1,6 @@
 """
 Testing/Evaluation script for stock price forecasting.
-Evaluates High/Low predictions from OHLCV data.
+Evaluates High/Close predictions from OHLCV data.
 
 Usage:
     python test.py --ticker AAPL
@@ -47,7 +47,7 @@ class TestConfig:
     ticker: str = "AAPL"
     data_root: str = "data/raw"
     seq_len: int = 30
-    pred_len: int = 5
+    pred_len: int = 1
     batch_size: int = 32
     checkpoint_dir: str = "checkpoints"
     device: str = field(default_factory=lambda: (
@@ -144,12 +144,12 @@ def evaluate(model, test_loader, criterion, device, dataset):
     
     # Also calculate per-target metrics
     high_metrics = calculate_metrics(preds_original[:, :, 0], trues_original[:, :, 0])
-    low_metrics = calculate_metrics(preds_original[:, :, 1], trues_original[:, :, 1])
+    close_metrics = calculate_metrics(preds_original[:, :, 1], trues_original[:, :, 1])
     
     return {
         'overall': metrics,
         'high': high_metrics,
-        'low': low_metrics,
+        'close': close_metrics,
         'test_loss': np.average(test_loss),
     }, preds_original, trues_original
 
@@ -263,10 +263,10 @@ def main():
     print(f"  MSE:  {results['high']['MSE']:.4f}")
     print(f"  MAE:  {results['high']['MAE']:.4f}")
     print(f"  RMSE: {results['high']['RMSE']:.4f}")
-    print(f"\nLow Price Prediction:")
-    print(f"  MSE:  {results['low']['MSE']:.4f}")
-    print(f"  MAE:  {results['low']['MAE']:.4f}")
-    print(f"  RMSE: {results['low']['RMSE']:.4f}")
+    print(f"\nClose Price Prediction:")
+    print(f"  MSE:  {results['close']['MSE']:.4f}")
+    print(f"  MAE:  {results['close']['MAE']:.4f}")
+    print(f"  RMSE: {results['close']['RMSE']:.4f}")
     print("=" * 60)
     
     # Save predictions
