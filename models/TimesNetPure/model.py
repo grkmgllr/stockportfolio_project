@@ -241,10 +241,10 @@ class TimesNetForecastModel(ForecastModel):
         2) Normalize `x` per-sample across time.
         3) Apply `DataEmbedding` to obtain latent features of size `d_model`.
         4) Expand the time axis from `seq_len` to `seq_len + pred_len` using a
-        linear projection over the time dimension (`align_time`).
+           linear projection over the time dimension (`align_time`).
         5) Process latent sequence with stacked TimesNet blocks.
         6) Project latent features to `c_out` channels.
-        7) Denormalize predictions back to the original scale.
+        7) Denormalize predictions (only if enc_in == c_out).
         8) Return only the last `pred_len` steps.
 
         Args:
@@ -256,8 +256,7 @@ class TimesNetForecastModel(ForecastModel):
 
         Returns:
             torch.Tensor:
-                Forecast horizon of shape [B, pred_len, c_out] in the *original*
-                data scale (after denormalization).
+                Forecast horizon of shape [B, pred_len, c_out].
 
         Raises:
             ValueError:
@@ -273,7 +272,7 @@ class TimesNetForecastModel(ForecastModel):
                 "Ensure dataset uses the same seq_len as config."
             )
 
-        # 1) normalize
+        # 1) normalize input
         x_norm, mean, std = self._normalize(x)
 
         # 2) embed
@@ -289,8 +288,10 @@ class TimesNetForecastModel(ForecastModel):
         # 5) project: [b, total_len, c_out]
         y = self.proj(enc)
 
-        # 6) denormalize back to original scale
-        y = self._denormalize(y, mean, std)
+        # 6) denormalize only if output dim matches input dim
+        # (skip when predicting subset of features, e.g., High/Low from OHLCV)
+        if self.cfg.enc_in == self.cfg.c_out:
+            y = self._denormalize(y, mean, std)
 
         # 7) return only forecast horizon
         return y[:, -self.cfg.pred_len :, :]

@@ -1,6 +1,10 @@
 """
-Training script for TimeMixer/TimesNetPure models.
-Usage: python train.py [--model TimeMixer|TimesNetPure] [--epochs N] ...
+Training script for stock price forecasting.
+Predicts High/Low from OHLCV data using TimeMixer or TimesNetPure.
+
+Usage:
+    python train.py --ticker AAPL
+    python train.py --ticker AAPL --model TimeMixer --epochs 100
 """
 import torch
 import torch.nn as nn
@@ -10,12 +14,12 @@ import time
 import os
 import argparse
 from dataclasses import dataclass, field
-from typing import Literal, Union
+from typing import Literal
 
-from dataset import ETTh1Dataset
+from dataset import YahooDataset
 from utils import EarlyStopping, get_scheduler, calculate_metrics
 
-# Import model configs
+# Import models
 from models import (
     TimeMixer, TimeMixerConfig,
     TimesNetForecastModel, TimesNetForecastConfig,
@@ -25,21 +29,25 @@ from models import (
 @dataclass
 class TrainingConfig:
     """Training and runtime configuration."""
+    # Model selection
+    model_name: Literal["TimeMixer", "TimesNetPure"] = "TimesNetPure"
+    
+    # Data configuration
+    ticker: str = "AAPL"
+    data_root: str = "data/raw"
+    seq_len: int = 30       # 30 days lookback
+    pred_len: int = 5       # 5 days forecast
+    
     # Training hyperparameters
-    batch_size: int = 64
-    epochs: int = 50
+    batch_size: int = 32
+    epochs: int = 100
     learning_rate: float = 0.001
-    weight_decay: float = 0.0
-    patience: int = 5
+    weight_decay: float = 1e-5
+    patience: int = 10
     grad_clip: float = 1.0
     scheduler: Literal["cosine", "step", "none"] = "cosine"
     scheduler_step_size: int = 10
     scheduler_gamma: float = 0.5
-    
-    # Data configuration
-    data_root: str = "data/processed"
-    data_path: str = "ETTh1_processed.csv"
-    features: Literal["M", "S", "MS"] = "M"
     
     # Runtime configuration
     device: str = field(default_factory=lambda: (
@@ -48,286 +56,244 @@ class TrainingConfig:
         else "cpu"
     ))
     checkpoint_dir: str = "checkpoints"
-    log_dir: str = "logs"
-    
-    # Model selection
-    model_name: Literal["TimeMixer", "TimesNetPure"] = "TimesNetPure"
 
 
-# Type alias for model configs
-ModelConfig = Union[TimeMixerConfig, TimesNetForecastConfig]
-
-
-def get_model_and_config(model_name: str) -> tuple:
+def get_model_config(model_name: str, seq_len: int, pred_len: int):
     """
-    Get model class and default config based on model name.
+    Get model config for Yahoo stock prediction.
     
-    Returns:
-        Tuple of (model_class, config_instance)
+    Input: OHLCV (5 features)
+    Output: High, Low (2 features)
     """
-    if model_name == "TimeMixer":
-        return TimeMixer, TimeMixerConfig()
-    elif model_name == "TimesNetPure":
-        return TimesNetForecastModel, TimesNetForecastConfig()
+    if model_name == "TimesNetPure":
+        return TimesNetForecastConfig(
+            seq_len=seq_len,
+            pred_len=pred_len,
+            enc_in=5,       # OHLCV
+            c_out=2,        # High, Low
+            d_model=32,
+            d_ff=64,
+            e_layers=2,
+            top_k=3,
+            num_kernels=6,
+            dropout=0.1,
+        )
+    elif model_name == "TimeMixer":
+        # Adjust downsampling layers based on seq_len divisibility
+        # seq_len must be divisible by 2^number_of_downsampling_layers
+        n_layers = 1 if seq_len % 4 != 0 else 2
+        return TimeMixerConfig(
+            historical_lookback_length=seq_len,
+            forecast_horizon_length=pred_len,
+            number_of_input_features=5,     # OHLCV
+            number_of_output_features=2,    # High, Low
+            model_embedding_dimension=64,
+            feedforward_hidden_dimension=128,
+            number_of_pdm_blocks=2,
+            dropout_probability=0.1,
+            downsampling_window_size=2,
+            number_of_downsampling_layers=n_layers,
+        )
     else:
-        raise ValueError(f"Unknown model: {model_name}. Choose 'TimeMixer' or 'TimesNetPure'.")
+        raise ValueError(f"Unknown model: {model_name}")
 
 
-def print_config(model_name: str, model_cfg: ModelConfig, train_cfg: TrainingConfig) -> None:
+def get_model(model_name: str, config):
+    """Create model instance from config."""
+    if model_name == "TimesNetPure":
+        return TimesNetForecastModel(config)
+    elif model_name == "TimeMixer":
+        return TimeMixer(config)
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
+
+
+def print_config(train_cfg: TrainingConfig, model_cfg) -> None:
     """Print configuration summary."""
-    print("\n" + "=" * 50)
-    print("Configuration Summary")
-    print("=" * 50)
-    print(f"Model: {model_name}")
+    print("\n" + "=" * 60)
+    print("Stock Price Forecasting - Training Configuration")
+    print("=" * 60)
+    print(f"Ticker: {train_cfg.ticker}")
+    print(f"Model: {train_cfg.model_name}")
     print(f"Device: {train_cfg.device}")
-    print(f"\nModel Parameters:")
-    print(f"  seq_len: {model_cfg.seq_len}")
-    print(f"  pred_len: {model_cfg.pred_len}")
-    print(f"  enc_in: {model_cfg.enc_in}")
-    print(f"  c_out: {model_cfg.c_out}")
-    if hasattr(model_cfg, 'd_model'):
-        print(f"  d_model: {model_cfg.d_model}")
-    if hasattr(model_cfg, 'e_layers'):
-        print(f"  e_layers: {model_cfg.e_layers}")
-    print(f"\nTraining Parameters:")
-    print(f"  batch_size: {train_cfg.batch_size}")
-    print(f"  epochs: {train_cfg.epochs}")
-    print(f"  learning_rate: {train_cfg.learning_rate}")
-    print(f"  patience: {train_cfg.patience}")
-    print("=" * 50 + "\n")
+    print(f"\nTask: Predict High/Low from OHLCV")
+    print(f"  Input:  OHLCV ({model_cfg.enc_in} features)")
+    print(f"  Output: High, Low ({model_cfg.c_out} features)")
+    print(f"  Lookback: {model_cfg.seq_len} days")
+    print(f"  Forecast: {model_cfg.pred_len} days")
+    print(f"\nTraining:")
+    print(f"  Batch size: {train_cfg.batch_size}")
+    print(f"  Epochs: {train_cfg.epochs}")
+    print(f"  Learning rate: {train_cfg.learning_rate}")
+    print(f"  Patience: {train_cfg.patience}")
+    print("=" * 60 + "\n")
 
 
-def train_epoch(
-    model: nn.Module,
-    train_loader: DataLoader,
-    criterion: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    train_cfg: TrainingConfig,
-    pred_len: int,
-) -> float:
+def train_epoch(model, train_loader, criterion, optimizer, device, grad_clip):
     """Run one training epoch."""
     model.train()
     train_loss = []
     
     for batch_x, batch_y in train_loader:
-        batch_x = batch_x.to(train_cfg.device)
-        batch_y = batch_y.to(train_cfg.device)
+        batch_x = batch_x.to(device)
+        batch_y = batch_y.to(device)
         
         optimizer.zero_grad()
         
-        # Forward pass (both models accept x, x_mark)
+        # Forward pass
         outputs = model(batch_x, None)
         
-        # Get predictions for loss calculation
-        pred = outputs[:, -pred_len:, :]
-        true = batch_y[:, -pred_len:, :]
-        
-        loss = criterion(pred, true)
+        # outputs: [B, pred_len, c_out] - already correct shape
+        loss = criterion(outputs, batch_y)
         train_loss.append(loss.item())
         
-        # Backward pass with gradient clipping
+        # Backward pass
         loss.backward()
-        if train_cfg.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), 
-                max_norm=train_cfg.grad_clip
-            )
+        if grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
         optimizer.step()
     
     return np.average(train_loss)
 
 
-def validate_epoch(
-    model: nn.Module,
-    val_loader: DataLoader,
-    criterion: nn.Module,
-    train_cfg: TrainingConfig,
-    pred_len: int,
-) -> float:
+def validate_epoch(model, val_loader, criterion, device):
     """Run validation epoch."""
     model.eval()
     val_loss = []
     
     with torch.no_grad():
         for batch_x, batch_y in val_loader:
-            batch_x = batch_x.to(train_cfg.device)
-            batch_y = batch_y.to(train_cfg.device)
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
             
             outputs = model(batch_x, None)
-            pred = outputs[:, -pred_len:, :]
-            true = batch_y[:, -pred_len:, :]
-            
-            loss = criterion(pred, true)
+            loss = criterion(outputs, batch_y)
             val_loss.append(loss.item())
     
     return np.average(val_loss)
 
-def parse_args() -> argparse.Namespace:
-    """
-    Parse command-line arguments for training-time configuration overrides.
-    
-    All arguments are optional. Any argument not provided will be None
-    and won't override the default TrainingConfig values.
-    """
-    parser = argparse.ArgumentParser(description="Train forecasting model")
 
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Train stock price forecasting model (predict High/Low from OHLCV)"
+    )
+
+    # Required
+    parser.add_argument(
+        "--ticker",
+        type=str,
+        default="AAPL",
+        help="Stock ticker symbol (default: AAPL)",
+    )
+    
+    # Model
     parser.add_argument(
         "--model",
         type=str,
-        default=None,
+        default="TimesNetPure",
         choices=["TimeMixer", "TimesNetPure"],
-        help="Model to train (default: TimesNetPure).",
+        help="Model to train (default: TimesNetPure)",
     )
+    
+    # Sequence lengths
+    parser.add_argument("--seq_len", type=int, default=30, help="Lookback window in days (default: 30)")
+    parser.add_argument("--pred_len", type=int, default=5, help="Prediction horizon in days (default: 5)")
 
     # Training hyperparameters
-    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=None, help="Batch size.")
-    parser.add_argument("--lr", type=float, default=None, help="Learning rate.")
-    parser.add_argument("--weight_decay", type=float, default=None, help="Weight decay.")
-    parser.add_argument("--patience", type=int, default=None, help="Early stopping patience.")
-    parser.add_argument("--grad_clip", type=float, default=None, help="Gradient clipping max norm.")
+    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
+    parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping")
+    parser.add_argument("--scheduler", type=str, default="cosine", choices=["cosine", "step", "none"])
 
-    parser.add_argument(
-        "--scheduler",
-        type=str,
-        default=None,
-        choices=["cosine", "step", "none"],
-        help="LR scheduler type.",
-    )
-    parser.add_argument("--scheduler_step_size", type=int, default=None, help="Step scheduler step size.")
-    parser.add_argument("--scheduler_gamma", type=float, default=None, help="Step scheduler gamma.")
+    # Data
+    parser.add_argument("--data_root", type=str, default="data/raw", help="Data directory")
 
-    # Data configuration
-    parser.add_argument("--data_root", type=str, default=None, help="Dataset root path.")
-    parser.add_argument("--data_path", type=str, default=None, help="Dataset CSV filename.")
-    parser.add_argument(
-        "--features",
-        type=str,
-        default=None,
-        choices=["M", "S", "MS"],
-        help="Features mode (M=multivariate, S=univariate, MS=multivariate-to-single).",
-    )
-
-    # Runtime configuration
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        choices=["cpu", "cuda", "mps"],
-        help="Device to use for training.",
-    )
-    parser.add_argument("--checkpoint_dir", type=str, default=None, help="Checkpoint directory.")
-    parser.add_argument("--log_dir", type=str, default=None, help="Log directory.")
+    # Runtime
+    parser.add_argument("--device", type=str, default=None, choices=["cpu", "cuda", "mps"])
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
 
     return parser.parse_args()
 
 
-def apply_overrides(train_cfg: TrainingConfig, args: argparse.Namespace) -> None:
-    """
-    Apply command-line argument overrides to training configuration.
-    
-    Only arguments explicitly set by the user (not None) are applied.
-    """
-    # Model selection
-    if args.model is not None:
-        train_cfg.model_name = args.model
-
-    # Device
-    if args.device is not None:
-        train_cfg.device = args.device
-
-    # Training hyperparameters
-    if args.epochs is not None:
-        train_cfg.epochs = args.epochs
-    if args.batch_size is not None:
-        train_cfg.batch_size = args.batch_size
-    if args.lr is not None:
-        train_cfg.learning_rate = args.lr
-    if args.weight_decay is not None:
-        train_cfg.weight_decay = args.weight_decay
-    if args.patience is not None:
-        train_cfg.patience = args.patience
-    if args.grad_clip is not None:
-        train_cfg.grad_clip = args.grad_clip
-    if args.scheduler is not None:
-        train_cfg.scheduler = args.scheduler
-    if args.scheduler_step_size is not None:
-        train_cfg.scheduler_step_size = args.scheduler_step_size
-    if args.scheduler_gamma is not None:
-        train_cfg.scheduler_gamma = args.scheduler_gamma
-
-    # Data configuration
-    if args.data_root is not None:
-        train_cfg.data_root = args.data_root
-    if args.data_path is not None:
-        train_cfg.data_path = args.data_path
-    if args.features is not None:
-        train_cfg.features = args.features
-
-    # Paths
-    if args.checkpoint_dir is not None:
-        train_cfg.checkpoint_dir = args.checkpoint_dir
-    if args.log_dir is not None:
-        train_cfg.log_dir = args.log_dir
-
 def main():
-    # Parse arguments and create training config
     args = parse_args()
-    train_cfg = TrainingConfig()
-    apply_overrides(train_cfg, args)
     
-    # Get model class and config based on model name
-    model_class, model_cfg = get_model_and_config(train_cfg.model_name)
+    # Create training config
+    train_cfg = TrainingConfig(
+        model_name=args.model,
+        ticker=args.ticker,
+        data_root=args.data_root,
+        seq_len=args.seq_len,
+        pred_len=args.pred_len,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        learning_rate=args.lr,
+        weight_decay=args.weight_decay,
+        patience=args.patience,
+        grad_clip=args.grad_clip,
+        scheduler=args.scheduler,
+        checkpoint_dir=args.checkpoint_dir,
+    )
+    
+    if args.device:
+        train_cfg.device = args.device
+    
+    # Get model config
+    model_cfg = get_model_config(train_cfg.model_name, train_cfg.seq_len, train_cfg.pred_len)
     
     # Print configuration
-    print_config(train_cfg.model_name, model_cfg, train_cfg)
+    print_config(train_cfg, model_cfg)
     
     # Create checkpoint directory
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
     
-    # Data loading
+    # Load datasets
     print("Loading Data...")
-    size = [model_cfg.seq_len, 0, model_cfg.pred_len]
-    
-    train_dataset = ETTh1Dataset(
-        root_path=train_cfg.data_root, 
-        flag='train', 
-        size=size, 
-        features=train_cfg.features
+    train_dataset = YahooDataset(
+        ticker=train_cfg.ticker,
+        root_path=train_cfg.data_root,
+        flag='train',
+        seq_len=train_cfg.seq_len,
+        pred_len=train_cfg.pred_len,
     )
-    val_dataset = ETTh1Dataset(
-        root_path=train_cfg.data_root, 
-        flag='val', 
-        size=size, 
-        features=train_cfg.features
+    val_dataset = YahooDataset(
+        ticker=train_cfg.ticker,
+        root_path=train_cfg.data_root,
+        flag='val',
+        seq_len=train_cfg.seq_len,
+        pred_len=train_cfg.pred_len,
     )
     
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=train_cfg.batch_size, 
-        shuffle=True, 
-        drop_last=True
+        train_dataset,
+        batch_size=train_cfg.batch_size,
+        shuffle=True,
+        drop_last=True,
     )
     val_loader = DataLoader(
-        val_dataset, 
-        batch_size=train_cfg.batch_size, 
-        shuffle=False, 
-        drop_last=True
+        val_dataset,
+        batch_size=train_cfg.batch_size,
+        shuffle=False,
+        drop_last=True,
     )
     
-    print(f"Train samples: {len(train_dataset)}")
+    print(f"\nTrain samples: {len(train_dataset)}")
     print(f"Val samples: {len(val_dataset)}")
     
-    # Model initialization
-    model = model_class(model_cfg).to(train_cfg.device)
-    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
+    # Create model
+    model = get_model(train_cfg.model_name, model_cfg).to(train_cfg.device)
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Loss, optimizer, scheduler
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(
-        model.parameters(), 
+        model.parameters(),
         lr=train_cfg.learning_rate,
-        weight_decay=train_cfg.weight_decay
+        weight_decay=train_cfg.weight_decay,
     )
     scheduler = get_scheduler(
         optimizer,
@@ -338,11 +304,14 @@ def main():
     )
     
     # Early stopping
-    checkpoint_path = os.path.join(train_cfg.checkpoint_dir, f"{train_cfg.model_name}_best.pt")
+    checkpoint_path = os.path.join(
+        train_cfg.checkpoint_dir,
+        f"{train_cfg.ticker}_{train_cfg.model_name}_best.pt"
+    )
     early_stopping = EarlyStopping(
         patience=train_cfg.patience,
         checkpoint_path=checkpoint_path,
-        verbose=True
+        verbose=True,
     )
     
     # Training loop
@@ -352,15 +321,11 @@ def main():
     for epoch in range(train_cfg.epochs):
         start_time = time.time()
         
-        # Train
         train_loss = train_epoch(
-            model, train_loader, criterion, optimizer, train_cfg, model_cfg.pred_len
+            model, train_loader, criterion, optimizer,
+            train_cfg.device, train_cfg.grad_clip
         )
-        
-        # Validate
-        val_loss = validate_epoch(
-            model, val_loader, criterion, train_cfg, model_cfg.pred_len
-        )
+        val_loss = validate_epoch(model, val_loader, criterion, train_cfg.device)
         
         # Scheduler step
         if scheduler is not None:
@@ -371,19 +336,17 @@ def main():
         
         elapsed = time.time() - start_time
         print(f"Epoch {epoch+1:3d}/{train_cfg.epochs} | "
-              f"Train Loss: {train_loss:.4f} | "
-              f"Val Loss: {val_loss:.4f} | "
-              f"LR: {current_lr:.2e} | "
-              f"Time: {elapsed:.1f}s")
+              f"Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
+              f"LR: {current_lr:.2e} | Time: {elapsed:.1f}s")
         
-        # Early stopping check
+        # Early stopping
         if early_stopping(val_loss, model, epoch + 1):
-            print(f"\nEarly stopping triggered at epoch {epoch + 1}")
+            print(f"\nEarly stopping at epoch {epoch + 1}")
             break
     
     print("-" * 60)
-    print(f"Training complete! Best model saved at epoch {early_stopping.best_epoch}")
-    print(f"Best validation loss: {early_stopping.best_loss:.4f}")
+    print(f"Training complete! Best epoch: {early_stopping.best_epoch}")
+    print(f"Best validation loss: {early_stopping.best_loss:.6f}")
     print(f"Checkpoint: {checkpoint_path}")
 
 
