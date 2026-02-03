@@ -27,7 +27,22 @@ from models import (
 
 @dataclass
 class TestConfig:
-    """Test configuration."""
+    """
+    Test/evaluation configuration for stock price forecasting.
+    
+    Contains settings for evaluating a trained model on the test set.
+    Parameters must match those used during training (especially seq_len, pred_len).
+    
+    Attributes:
+        model_name: Model architecture (must match trained model)
+        ticker: Stock ticker symbol (must match trained model)
+        data_root: Directory containing {ticker}.csv files
+        seq_len: Lookback window (must match training)
+        pred_len: Forecast horizon (must match training)
+        batch_size: Evaluation batch size
+        checkpoint_dir: Directory containing saved checkpoints
+        device: Compute device (auto-detected if not specified)
+    """
     model_name: Literal["TimeMixer", "TimesNetPure"] = "TimesNetPure"
     ticker: str = "AAPL"
     data_root: str = "data/raw"

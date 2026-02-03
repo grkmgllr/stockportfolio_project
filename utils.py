@@ -1,24 +1,44 @@
 """
 Utility functions and classes for training and evaluation.
+
+This module provides:
+- EarlyStopping: Stop training when validation loss plateaus
+- calculate_metrics: Compute MSE, MAE, RMSE for predictions
+- load_checkpoint: Load model weights from saved checkpoint
+- get_scheduler: Create learning rate scheduler
 """
 import torch
 import numpy as np
 import os
-from typing import Optional
+from typing import Optional, Dict
 
 
 class EarlyStopping:
-    """Early stopping to stop training when validation loss doesn't improve."""
+    """
+    Early stopping callback to stop training when validation loss doesn't improve.
     
-    def __init__(self, patience: int = 5, delta: float = 0.0, 
-                 checkpoint_path: str = "checkpoints/best_model.pt",
-                 verbose: bool = True):
+    Monitors validation loss and saves the best model checkpoint. Training stops
+    if no improvement is seen for `patience` consecutive epochs.
+    
+    Attributes:
+        best_loss: Best validation loss seen so far
+        best_epoch: Epoch number of the best model
+        early_stop: Flag indicating whether to stop training
+    """
+    
+    def __init__(
+        self,
+        patience: int = 5,
+        delta: float = 0.0, 
+        checkpoint_path: str = "checkpoints/best_model.pt",
+        verbose: bool = True
+    ):
         """
         Args:
-            patience: Number of epochs to wait for improvement
-            delta: Minimum change to qualify as improvement
-            checkpoint_path: Path to save the best model
-            verbose: Print messages when saving
+            patience: Number of epochs to wait for improvement before stopping
+            delta: Minimum change in loss to qualify as improvement
+            checkpoint_path: Path to save the best model checkpoint
+            verbose: Whether to print messages when saving checkpoints
         """
         self.patience = patience
         self.delta = delta
@@ -66,25 +86,35 @@ class EarlyStopping:
             print(f"Saved best model (epoch {epoch}, val_loss: {self.best_loss:.4f})")
 
 
-def calculate_metrics(pred: np.ndarray, true: np.ndarray) -> dict:
+def calculate_metrics(pred: np.ndarray, true: np.ndarray) -> Dict[str, float]:
     """
-    Calculate regression metrics.
+    Calculate regression metrics for forecasting evaluation.
+    
+    Computes Mean Squared Error (MSE), Mean Absolute Error (MAE), 
+    and Root Mean Squared Error (RMSE) between predictions and ground truth.
     
     Args:
-        pred: Predictions array
-        true: Ground truth array
+        pred: Predictions array of any shape
+        true: Ground truth array (same shape as pred)
         
     Returns:
-        Dictionary with MSE, MAE, RMSE
+        Dictionary containing:
+            - MSE: Mean Squared Error
+            - MAE: Mean Absolute Error  
+            - RMSE: Root Mean Squared Error
+    
+    Example:
+        >>> metrics = calculate_metrics(predictions, targets)
+        >>> print(f"MAE: ${metrics['MAE']:.2f}")
     """
     mse = np.mean((pred - true) ** 2)
     mae = np.mean(np.abs(pred - true))
     rmse = np.sqrt(mse)
     
     return {
-        'MSE': mse,
-        'MAE': mae,
-        'RMSE': rmse,
+        'MSE': float(mse),
+        'MAE': float(mae),
+        'RMSE': float(rmse),
     }
 
 

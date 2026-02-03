@@ -28,7 +28,28 @@ from models import (
 
 @dataclass
 class TrainingConfig:
-    """Training and runtime configuration."""
+    """
+    Training configuration for stock price forecasting.
+    
+    Contains all hyperparameters and settings for training a model
+    to predict High/Low prices from OHLCV input data.
+    
+    Attributes:
+        model_name: Model architecture ('TimeMixer' or 'TimesNetPure')
+        ticker: Stock ticker symbol (e.g., 'AAPL', 'MSFT')
+        data_root: Directory containing {ticker}.csv files
+        seq_len: Number of historical days to use as input (lookback window)
+        pred_len: Number of future days to predict (forecast horizon)
+        batch_size: Training batch size
+        epochs: Maximum number of training epochs
+        learning_rate: Initial learning rate for Adam optimizer
+        weight_decay: L2 regularization coefficient
+        patience: Early stopping patience (epochs without improvement)
+        grad_clip: Maximum gradient norm for clipping
+        scheduler: Learning rate scheduler type
+        device: Compute device (auto-detected if not specified)
+        checkpoint_dir: Directory to save model checkpoints
+    """
     # Model selection
     model_name: Literal["TimeMixer", "TimesNetPure"] = "TimesNetPure"
     
