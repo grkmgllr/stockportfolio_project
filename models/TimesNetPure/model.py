@@ -23,13 +23,6 @@ class TimesNetForecastConfig:
     The model consumes a fixed-length historical window of length `seq_len`
     and produces a forecast horizon of length `pred_len`.
 
-    Notes
-    -----
-    - `seq_len` in this config must match the dataset's sequence length.
-      A mismatch is treated as a configuration error and raises an exception.
-    - `c_out` can be equal to `enc_in` (typical multivariate forecasting), but
-      may also differ if you want to project to a different output dimension.
-
     Attributes
     ----------
     seq_len : int

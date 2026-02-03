@@ -45,6 +45,27 @@ class TimeMixerConfig:
 
     use_output_residual_connection: bool = True
 
+    # Compatibility properties for unified interface with TimesNetForecastConfig
+    @property
+    def seq_len(self) -> int:
+        """Alias for historical_lookback_length."""
+        return self.historical_lookback_length
+
+    @property
+    def pred_len(self) -> int:
+        """Alias for forecast_horizon_length."""
+        return self.forecast_horizon_length
+
+    @property
+    def enc_in(self) -> int:
+        """Alias for number_of_input_features."""
+        return self.number_of_input_features
+
+    @property
+    def c_out(self) -> int:
+        """Alias for number_of_output_features."""
+        return self.number_of_output_features
+
     def get_multiscale_input_lengths(self) -> list[int]:
         """
         Returns the input length for each scale, from fine -> coarse
@@ -191,20 +212,27 @@ class TimeMixer(nn.Module):
         fused = torch.stack(per_scale_forecasts, dim=-1).sum(dim=-1)  # [B, H, D]
         return fused
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, x_mark: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        x: [B, L, C_in] -> y: [B, H, C_out]
+        Forward pass for TimeMixer.
+        
+        Args:
+            x: Input tensor [B, L, C_in]
+            x_mark: Optional time features (unused, for interface compatibility)
+            
+        Returns:
+            y: Output tensor [B, H, C_out]
         """
         # multiscale observations
-        x_scales = self._build_multiscale_inputs(x) # [B,T_i,C_in]
+        x_scales = self.multiscale_inputs(x)  # [B,T_i,C_in]
         # embed
-        z_scales = self._embed_multiscale(x_scales) # [B,T_i,D]
+        z_scales = self.embed_multiscale(x_scales)  # [B,T_i,D]
         # PDM encoder stack
         for pdm in self.pdm_blocks:
             z_scales = pdm(z_scales)
         # FMM forecasting
-        future_latent = self._future_multi_predictor_mixing(z_scales) # [B,H,D]
+        future_latent = self.fmulti_predictor_mixing(z_scales)  # [B,H,D]
         # output projection
-        y = self.output_projection(future_latent) # [B,H,C_out]
+        y = self.output_projection(future_latent)  # [B,H,C_out]
         return y
     

@@ -1,6 +1,6 @@
 """
-Training script for TimeMixer/TimeMixer++ models.
-Usage: python train.py
+Training script for TimeMixer/TimesNetPure models.
+Usage: python train.py [--model TimeMixer|TimesNetPure] [--epochs N] ...
 """
 import torch
 import torch.nn as nn
@@ -9,282 +9,308 @@ import numpy as np
 import time
 import os
 import argparse
+from dataclasses import dataclass, field
+from typing import Literal, Union
 
-from configs.config import get_config
 from dataset import ETTh1Dataset
-from utils import (
-    EarlyStopping, 
-    get_model, 
-    get_scheduler, 
-    print_config,
-    calculate_metrics
+from utils import EarlyStopping, get_scheduler, calculate_metrics
+
+# Import model configs
+from models import (
+    TimeMixer, TimeMixerConfig,
+    TimesNetForecastModel, TimesNetForecastConfig,
 )
 
 
-def train_epoch(model, train_loader, criterion, optimizer, config):
+@dataclass
+class TrainingConfig:
+    """Training and runtime configuration."""
+    # Training hyperparameters
+    batch_size: int = 64
+    epochs: int = 50
+    learning_rate: float = 0.001
+    weight_decay: float = 0.0
+    patience: int = 5
+    grad_clip: float = 1.0
+    scheduler: Literal["cosine", "step", "none"] = "cosine"
+    scheduler_step_size: int = 10
+    scheduler_gamma: float = 0.5
+    
+    # Data configuration
+    data_root: str = "data/processed"
+    data_path: str = "ETTh1_processed.csv"
+    features: Literal["M", "S", "MS"] = "M"
+    
+    # Runtime configuration
+    device: str = field(default_factory=lambda: (
+        "cuda" if torch.cuda.is_available() 
+        else "mps" if torch.backends.mps.is_available() 
+        else "cpu"
+    ))
+    checkpoint_dir: str = "checkpoints"
+    log_dir: str = "logs"
+    
+    # Model selection
+    model_name: Literal["TimeMixer", "TimesNetPure"] = "TimesNetPure"
+
+
+# Type alias for model configs
+ModelConfig = Union[TimeMixerConfig, TimesNetForecastConfig]
+
+
+def get_model_and_config(model_name: str) -> tuple:
+    """
+    Get model class and default config based on model name.
+    
+    Returns:
+        Tuple of (model_class, config_instance)
+    """
+    if model_name == "TimeMixer":
+        return TimeMixer, TimeMixerConfig()
+    elif model_name == "TimesNetPure":
+        return TimesNetForecastModel, TimesNetForecastConfig()
+    else:
+        raise ValueError(f"Unknown model: {model_name}. Choose 'TimeMixer' or 'TimesNetPure'.")
+
+
+def print_config(model_name: str, model_cfg: ModelConfig, train_cfg: TrainingConfig) -> None:
+    """Print configuration summary."""
+    print("\n" + "=" * 50)
+    print("Configuration Summary")
+    print("=" * 50)
+    print(f"Model: {model_name}")
+    print(f"Device: {train_cfg.device}")
+    print(f"\nModel Parameters:")
+    print(f"  seq_len: {model_cfg.seq_len}")
+    print(f"  pred_len: {model_cfg.pred_len}")
+    print(f"  enc_in: {model_cfg.enc_in}")
+    print(f"  c_out: {model_cfg.c_out}")
+    if hasattr(model_cfg, 'd_model'):
+        print(f"  d_model: {model_cfg.d_model}")
+    if hasattr(model_cfg, 'e_layers'):
+        print(f"  e_layers: {model_cfg.e_layers}")
+    print(f"\nTraining Parameters:")
+    print(f"  batch_size: {train_cfg.batch_size}")
+    print(f"  epochs: {train_cfg.epochs}")
+    print(f"  learning_rate: {train_cfg.learning_rate}")
+    print(f"  patience: {train_cfg.patience}")
+    print("=" * 50 + "\n")
+
+
+def train_epoch(
+    model: nn.Module,
+    train_loader: DataLoader,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    train_cfg: TrainingConfig,
+    pred_len: int,
+) -> float:
     """Run one training epoch."""
     model.train()
     train_loss = []
     
     for batch_x, batch_y in train_loader:
-        batch_x = batch_x.to(config.device)
-        batch_y = batch_y.to(config.device)
+        batch_x = batch_x.to(train_cfg.device)
+        batch_y = batch_y.to(train_cfg.device)
         
         optimizer.zero_grad()
         
-        # Forward pass
+        # Forward pass (both models accept x, x_mark)
         outputs = model(batch_x, None)
         
         # Get predictions for loss calculation
-        pred = outputs[:, -config.model.pred_len:, :]
-        true = batch_y[:, -config.model.pred_len:, :]
+        pred = outputs[:, -pred_len:, :]
+        true = batch_y[:, -pred_len:, :]
         
         loss = criterion(pred, true)
         train_loss.append(loss.item())
         
         # Backward pass with gradient clipping
         loss.backward()
-        if config.training.grad_clip > 0:
+        if train_cfg.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), 
-                max_norm=config.training.grad_clip
+                max_norm=train_cfg.grad_clip
             )
         optimizer.step()
     
     return np.average(train_loss)
 
 
-def validate_epoch(model, val_loader, criterion, config):
+def validate_epoch(
+    model: nn.Module,
+    val_loader: DataLoader,
+    criterion: nn.Module,
+    train_cfg: TrainingConfig,
+    pred_len: int,
+) -> float:
     """Run validation epoch."""
     model.eval()
     val_loss = []
     
     with torch.no_grad():
         for batch_x, batch_y in val_loader:
-            batch_x = batch_x.to(config.device)
-            batch_y = batch_y.to(config.device)
+            batch_x = batch_x.to(train_cfg.device)
+            batch_y = batch_y.to(train_cfg.device)
             
             outputs = model(batch_x, None)
-            pred = outputs[:, -config.model.pred_len:, :]
-            true = batch_y[:, -config.model.pred_len:, :]
+            pred = outputs[:, -pred_len:, :]
+            true = batch_y[:, -pred_len:, :]
             
             loss = criterion(pred, true)
             val_loss.append(loss.item())
     
     return np.average(val_loss)
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """
     Parse command-line arguments for training-time configuration overrides.
-
-    This function defines and parses a set of optional command-line arguments
-    that allow users to override selected fields of the static configuration
-    file at runtime. It is designed to support lightweight experimentation
-    without modifying configuration files or source code.
-
-    The parsed arguments are intentionally limited to:
-        - model selection,
-        - training hyperparameters,
-        - data paths and feature modes,
-        - runtime environment options (device, output paths).
-
-    All arguments are optional. Any argument that is not explicitly provided
-    by the user will be returned as None and must not override the default
-    configuration values.
-
-    The parsed arguments are expected to be applied to the configuration
-    object via a separate post-processing function (e.g., `apply_overrides`).
-
-    Returns
-    -------
-    argparse.Namespace
-        A namespace object containing parsed command-line arguments.
-        Each attribute corresponds to a CLI flag and is either:
-            - a user-provided value, or
-            - None if the flag was not specified.
+    
+    All arguments are optional. Any argument not provided will be None
+    and won't override the default TrainingConfig values.
     """
-
     parser = argparse.ArgumentParser(description="Train forecasting model")
 
     parser.add_argument(
         "--model",
         type=str,
         default=None,
-        choices=["TimeMixer", "TimeMixer++", "TimesNetPure", "ModernTCN"],
-        help="Override model_name in config.",
+        choices=["TimeMixer", "TimesNetPure"],
+        help="Model to train (default: TimesNetPure).",
     )
 
-    parser.add_argument("--epochs", type=int, default=None, help="Override training epochs.")
-    parser.add_argument("--batch_size", type=int, default=None, help="Override batch size.")
-    parser.add_argument("--lr", type=float, default=None, help="Override learning rate.")
-    parser.add_argument("--weight_decay", type=float, default=None, help="Override weight decay.")
-    parser.add_argument("--patience", type=int, default=None, help="Override early stopping patience.")
-    parser.add_argument("--grad_clip", type=float, default=None, help="Override grad clip max norm.")
+    # Training hyperparameters
+    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs.")
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size.")
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate.")
+    parser.add_argument("--weight_decay", type=float, default=None, help="Weight decay.")
+    parser.add_argument("--patience", type=int, default=None, help="Early stopping patience.")
+    parser.add_argument("--grad_clip", type=float, default=None, help="Gradient clipping max norm.")
 
     parser.add_argument(
         "--scheduler",
         type=str,
         default=None,
         choices=["cosine", "step", "none"],
-        help="Override scheduler type.",
+        help="LR scheduler type.",
     )
-    parser.add_argument("--scheduler_step_size", type=int, default=None, help="Override step scheduler step size.")
-    parser.add_argument("--scheduler_gamma", type=float, default=None, help="Override step scheduler gamma.")
+    parser.add_argument("--scheduler_step_size", type=int, default=None, help="Step scheduler step size.")
+    parser.add_argument("--scheduler_gamma", type=float, default=None, help="Step scheduler gamma.")
 
-    parser.add_argument("--data_root", type=str, default=None, help="Override dataset root_path.")
-    parser.add_argument("--data_path", type=str, default=None, help="Override dataset csv filename.")
+    # Data configuration
+    parser.add_argument("--data_root", type=str, default=None, help="Dataset root path.")
+    parser.add_argument("--data_path", type=str, default=None, help="Dataset CSV filename.")
     parser.add_argument(
         "--features",
         type=str,
         default=None,
         choices=["M", "S", "MS"],
-        help="Override features mode.",
+        help="Features mode (M=multivariate, S=univariate, MS=multivariate-to-single).",
     )
 
+    # Runtime configuration
     parser.add_argument(
         "--device",
         type=str,
         default=None,
         choices=["cpu", "cuda", "mps"],
-        help="Override device.",
+        help="Device to use for training.",
     )
-
-    parser.add_argument("--checkpoint_dir", type=str, default=None, help="Override checkpoint directory.")
-    parser.add_argument("--log_dir", type=str, default=None, help="Override log directory.")
+    parser.add_argument("--checkpoint_dir", type=str, default=None, help="Checkpoint directory.")
+    parser.add_argument("--log_dir", type=str, default=None, help="Log directory.")
 
     return parser.parse_args()
 
-def apply_overrides(config, args):
+
+def apply_overrides(train_cfg: TrainingConfig, args: argparse.Namespace) -> None:
     """
-    Apply command-line argument overrides to a configuration object.
-
-    This function updates a configuration instance in-place using values
-    provided via command-line arguments. Only arguments that are explicitly
-    set by the user (i.e., not None) are applied; all other configuration
-    fields remain unchanged.
-
-    The override logic is intentionally explicit and conservative:
-        - No new configuration fields are introduced.
-        - Nested configuration objects (e.g., training, data) are updated
-          field-by-field to preserve structure.
-        - Device-specific constraints (e.g., disabling AMP on non-CUDA
-          backends) are enforced after overrides are applied.
-
-    This separation of concerns ensures that:
-        - configuration parsing,
-        - configuration definition,
-        - and configuration mutation
-
-    remain logically decoupled and easy to reason about.
-
-    Args
-    ----
-    config : Config
-        Configuration object returned by `get_config()`. This object is
-        modified in-place.
-    args : argparse.Namespace
-        Parsed command-line arguments returned by `parse_args()`.
-
-    Returns
-    -------
-    None
-        This function has no return value. All updates are applied directly
-        to the provided configuration object.
-
-    Notes
-    -----
-    - If a device override is provided, device-dependent flags such as AMP
-      and torch.compile are adjusted accordingly.
-    - This function does not validate semantic consistency between arguments
-      (e.g., model compatibility); it assumes valid input.
-    """
+    Apply command-line argument overrides to training configuration.
     
-    # model
+    Only arguments explicitly set by the user (not None) are applied.
+    """
+    # Model selection
     if args.model is not None:
-        config.model_name = args.model
+        train_cfg.model_name = args.model
 
-    # device
+    # Device
     if args.device is not None:
-        config.device = args.device
-        # mirror config device rules
-        if config.device != "cuda":
-            config.use_amp = False
-            config.compile_model = False
-        if config.device == "mps":
-            config.training.num_workers = 0
+        train_cfg.device = args.device
 
-    # training
+    # Training hyperparameters
     if args.epochs is not None:
-        config.training.epochs = args.epochs
+        train_cfg.epochs = args.epochs
     if args.batch_size is not None:
-        config.training.batch_size = args.batch_size
+        train_cfg.batch_size = args.batch_size
     if args.lr is not None:
-        config.training.learning_rate = args.lr
+        train_cfg.learning_rate = args.lr
     if args.weight_decay is not None:
-        config.training.weight_decay = args.weight_decay
+        train_cfg.weight_decay = args.weight_decay
     if args.patience is not None:
-        config.training.patience = args.patience
+        train_cfg.patience = args.patience
     if args.grad_clip is not None:
-        config.training.grad_clip = args.grad_clip
+        train_cfg.grad_clip = args.grad_clip
     if args.scheduler is not None:
-        config.training.scheduler = args.scheduler
+        train_cfg.scheduler = args.scheduler
     if args.scheduler_step_size is not None:
-        config.training.scheduler_step_size = args.scheduler_step_size
+        train_cfg.scheduler_step_size = args.scheduler_step_size
     if args.scheduler_gamma is not None:
-        config.training.scheduler_gamma = args.scheduler_gamma
+        train_cfg.scheduler_gamma = args.scheduler_gamma
 
-    # data
+    # Data configuration
     if args.data_root is not None:
-        config.data.root_path = args.data_root
+        train_cfg.data_root = args.data_root
     if args.data_path is not None:
-        config.data.data_path = args.data_path
+        train_cfg.data_path = args.data_path
     if args.features is not None:
-        config.data.features = args.features
+        train_cfg.features = args.features
 
-    # paths
+    # Paths
     if args.checkpoint_dir is not None:
-        config.checkpoint_dir = args.checkpoint_dir
+        train_cfg.checkpoint_dir = args.checkpoint_dir
     if args.log_dir is not None:
-        config.log_dir = args.log_dir
+        train_cfg.log_dir = args.log_dir
 
 def main():
-    # Load configuration
+    # Parse arguments and create training config
     args = parse_args()
-
-    # Load configuration
-    config = get_config()
-    apply_overrides(config, args)
-    print_config(config)
+    train_cfg = TrainingConfig()
+    apply_overrides(train_cfg, args)
+    
+    # Get model class and config based on model name
+    model_class, model_cfg = get_model_and_config(train_cfg.model_name)
+    
+    # Print configuration
+    print_config(train_cfg.model_name, model_cfg, train_cfg)
     
     # Create checkpoint directory
-    os.makedirs(config.checkpoint_dir, exist_ok=True)
+    os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
     
     # Data loading
     print("Loading Data...")
-    size = [config.model.seq_len, 0, config.model.pred_len]
+    size = [model_cfg.seq_len, 0, model_cfg.pred_len]
     
     train_dataset = ETTh1Dataset(
-        root_path=config.data.root_path, 
+        root_path=train_cfg.data_root, 
         flag='train', 
         size=size, 
-        features=config.data.features
+        features=train_cfg.features
     )
     val_dataset = ETTh1Dataset(
-        root_path=config.data.root_path, 
+        root_path=train_cfg.data_root, 
         flag='val', 
         size=size, 
-        features=config.data.features
+        features=train_cfg.features
     )
     
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=config.training.batch_size, 
+        batch_size=train_cfg.batch_size, 
         shuffle=True, 
         drop_last=True
     )
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=config.training.batch_size, 
+        batch_size=train_cfg.batch_size, 
         shuffle=False, 
         drop_last=True
     )
@@ -293,22 +319,28 @@ def main():
     print(f"Val samples: {len(val_dataset)}")
     
     # Model initialization
-    model = get_model(config.model_name, config.get_model_params(), config.device)
+    model = model_class(model_cfg).to(train_cfg.device)
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Loss, optimizer, scheduler
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(
         model.parameters(), 
-        lr=config.training.learning_rate,
-        weight_decay=config.training.weight_decay
+        lr=train_cfg.learning_rate,
+        weight_decay=train_cfg.weight_decay
     )
-    scheduler = get_scheduler(optimizer, config)
+    scheduler = get_scheduler(
+        optimizer,
+        scheduler_type=train_cfg.scheduler,
+        epochs=train_cfg.epochs,
+        step_size=train_cfg.scheduler_step_size,
+        gamma=train_cfg.scheduler_gamma,
+    )
     
     # Early stopping
-    checkpoint_path = os.path.join(config.checkpoint_dir, f"{config.model_name.replace('+', 'p')}_best.pt")
+    checkpoint_path = os.path.join(train_cfg.checkpoint_dir, f"{train_cfg.model_name}_best.pt")
     early_stopping = EarlyStopping(
-        patience=config.training.patience,
+        patience=train_cfg.patience,
         checkpoint_path=checkpoint_path,
         verbose=True
     )
@@ -317,24 +349,28 @@ def main():
     print("\nStarting Training...")
     print("-" * 60)
     
-    for epoch in range(config.training.epochs):
+    for epoch in range(train_cfg.epochs):
         start_time = time.time()
         
         # Train
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, config)
+        train_loss = train_epoch(
+            model, train_loader, criterion, optimizer, train_cfg, model_cfg.pred_len
+        )
         
         # Validate
-        val_loss = validate_epoch(model, val_loader, criterion, config)
+        val_loss = validate_epoch(
+            model, val_loader, criterion, train_cfg, model_cfg.pred_len
+        )
         
         # Scheduler step
         if scheduler is not None:
             scheduler.step()
             current_lr = scheduler.get_last_lr()[0]
         else:
-            current_lr = config.training.learning_rate
+            current_lr = train_cfg.learning_rate
         
         elapsed = time.time() - start_time
-        print(f"Epoch {epoch+1:3d}/{config.training.epochs} | "
+        print(f"Epoch {epoch+1:3d}/{train_cfg.epochs} | "
               f"Train Loss: {train_loss:.4f} | "
               f"Val Loss: {val_loss:.4f} | "
               f"LR: {current_lr:.2e} | "
