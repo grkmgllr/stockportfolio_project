@@ -1,3 +1,18 @@
+"""
+Utility functions for TimesNetPure.
+
+This module contains helper routines that are shared across the TimesNetPure
+implementation. Currently, it focuses on frequency-domain analysis used by
+TimesNet blocks to identify dominant temporal periods in time-series data.
+
+The utilities defined here are:
+    - stateless,
+    - free of trainable parameters,
+    - independent of training logic.
+
+They operate purely on input tensors and return data-dependent outputs without maintaining state.
+"""
+
 from __future__ import annotations
 
 from typing import Tuple
@@ -12,19 +27,68 @@ from .types import BTC
 @torch.no_grad()
 def fft_top_periods(x: BTC, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Estimate dominant periods via FFT amplitudes.
+    Identify dominant temporal periods in a batch of time series using FFT.
 
-    The function computes rFFT along the time axis, finds the top-k frequency
-    indices by mean amplitude (excluding DC), and converts them to periods.
+    This function estimates the most influential periodic components of a
+    time-series signal by analyzing its frequency-domain representation.
+    It follows the core idea used in TimesNet blocks:
 
-    Args:
-        x: [b, t, c] input time series (batch, time, channels).
-        k: number of dominant frequencies/periods to select (k >= 1).
+    (1) Transform the input sequence from the time domain to the frequency
+        domain using the real-valued Fast Fourier Transform (rFFT).
+    (2) Compute the magnitude (amplitude) of each frequency component.
+    (3) Aggregate amplitudes across the batch and channel dimensions to
+        obtain a global importance score per frequency.
+    (4) Select the top-k frequency indices with the largest amplitudes,
+        excluding the DC component.
+    (5) Convert the selected frequency indices into period lengths using
+        the relation:
+            period ≈ T / f_idx
 
-    Returns:
-        periods: int64 tensor of shape [k_eff]. Each element is an estimated period length.
-        weights: float tensor of shape [b, k_eff]. Per-batch amplitudes for the selected frequencies.
+        where T is the sequence length and f_idx is the selected FFT bin index.
+        In this implementation, periods are computed as floor(T / f_idx).
+
+    The resulting periods represent dominant repeating patterns in the
+    input sequence and are used by TimesNet blocks to fold the sequence
+    into a 2D representation.
+
+    Notes
+    -----
+    - The DC component (zero frequency) is explicitly suppressed, as it
+      corresponds to the mean of the signal rather than a periodic pattern.
+    - The effective number of selected frequencies is bounded by T // 2,
+      which is the maximum number of non-DC frequency bins in rFFT.
+    - For very short sequences (T < 2), the function falls back to a
+      trivial period of 1.
+
+    Args
+    ----
+    x : BTC
+        Input time-series tensor of shape [B, T, C], where:
+            B = batch size,
+            T = sequence length,
+            C = number of channels/features.
+    k : int
+        Number of dominant frequencies (periods) to select.
+        Must satisfy k >= 1.
+
+    Returns
+    -------
+    periods : torch.Tensor
+        Integer tensor of shape [k_eff], where each value represents an
+        estimated period length (>= 1). Here, k_eff = min(k, max(T // 2, 1)).
+    weights : torch.Tensor
+        Floating-point tensor of shape [B, k_eff] containing per-sample
+        amplitude weights for the selected frequencies. These weights are
+        typically used to aggregate reconstructions across periods.
+
+    Raises
+    ------
+    ValueError
+        If k < 1.
+    ValueError
+        If the input tensor x does not have rank 3.
     """
+
     if k < 1:
         raise ValueError("k must be >= 1")
     if x.dim() != 3:

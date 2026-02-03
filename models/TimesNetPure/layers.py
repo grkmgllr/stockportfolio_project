@@ -1,3 +1,17 @@
+"""
+Embedding and convolutional building blocks used by TimesNetPure.
+
+This module implements:
+    - Positional embedding (sin/cos, fixed)
+    - Token/value embedding (1D convolution over time)
+    - Temporal / time-feature embeddings for calendar features
+    - DataEmbedding wrapper that combines value + position (+ optional time)
+    - Inception-style 2D convolution blocks used inside TimesNet blocks
+
+All layers are designed to operate on batched time-series tensors with shapes
+[B, T, C] or [B, T, D].
+"""
+
 from __future__ import annotations
 
 import math
@@ -13,7 +27,22 @@ from .types import BTC, BTD
 
 
 class PositionalEmbedding(nn.Module):
-    """Sinusoidal positional embedding (fixed, no gradients)."""
+    """
+    Fixed sinusoidal positional encoding.
+
+    This layer creates a deterministic (non-trainable) sinusoidal positional
+    encoding as introduced in the Transformer literature. The encoding is stored
+    as a buffer and sliced to the input sequence length at runtime.
+
+    The output is added to token/value embeddings to inject information about
+    absolute positions in the sequence.
+
+    Shapes:
+        Input:
+            x: [B, T, C]  (used only for extracting T)
+        Returns:
+            pe: [B, T, D] where D = d_model
+    """
 
     pe: torch.Tensor
 
@@ -34,6 +63,17 @@ class PositionalEmbedding(nn.Module):
 
     @beartype
     def forward(self, x: BTC) -> BTD:
+        """
+        Return positional encodings for the given sequence length.
+
+        Args:
+            x (BTC): Input tensor with shape [B, T, C]. Only the time length T
+                is used to slice the positional encoding buffer.
+
+        Returns:
+            BTD: Positional encodings with shape [B, T, D].
+        """
+
         t = x.size(1)
         if t > self.pe.size(1):
             raise ValueError(f"PositionalEmbedding max_len={self.pe.size(1)} < seq_len={t}")
@@ -42,10 +82,22 @@ class PositionalEmbedding(nn.Module):
 
 
 class TokenEmbedding(nn.Module):
-    """Value embedding with 1D conv over time (circular padding), like the original.
+    """
+    Token/value embedding via 1D convolution over the time axis.
 
-    Input  : [b, t, c_in]
-    Output : [b, t, d_model]
+    This layer maps input features C_in to model dimension D using a 1D convolution
+    applied along time. The convolution uses circular padding (as in many TimesNet
+    implementations) to reduce boundary artifacts.
+
+    Args:
+        c_in (int): Number of input features (channels).
+        d_model (int): Embedding dimension.
+
+    Input:
+        x: [B, T, C_in]
+
+    Returns:
+        z: [B, T, D]
     """
 
     def __init__(self, c_in: int, d_model: int) -> None:
@@ -63,12 +115,38 @@ class TokenEmbedding(nn.Module):
         nn.init.kaiming_normal_(self.token_conv.weight, mode="fan_in", nonlinearity="leaky_relu")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Embed input values.
+
+        Args:
+            x (torch.Tensor): Input tensor with shape [B, T, C_in].
+
+        Returns:
+            torch.Tensor: Embedded tensor with shape [B, T, D].
+        """
+
         # [b, t, c] -> [b, c, t] -> conv -> [b, d, t] -> [b, t, d]
         return self.token_conv(x.transpose(1, 2)).transpose(1, 2)
 
 
 class FixedEmbedding(nn.Module):
-    """Fixed (sin/cos) embedding over an index space [0..c_in-1]."""
+    """
+    Fixed (non-trainable) sinusoidal embedding for discrete indices.
+
+    This layer is used to embed discrete calendar/time components (e.g., month,
+    weekday) using a deterministic sinusoidal basis. The embedding weights are
+    stored in an nn.Embedding but frozen (requires_grad=False).
+
+    Args:
+        c_in (int): Size of the discrete vocabulary (number of unique indices).
+        d_model (int): Embedding dimension.
+
+    Input:
+        x: integer tensor of indices with shape [*]
+
+    Returns:
+        emb: embedded tensor with shape [*, D]
+    """
 
     def __init__(self, c_in: int, d_model: int) -> None:
         super().__init__()
@@ -86,18 +164,45 @@ class FixedEmbedding(nn.Module):
         self.emb.weight = nn.Parameter(w, requires_grad=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Embed discrete indices with fixed sinusoidal weights.
+
+        Args:
+            x (torch.Tensor): Integer tensor of indices with arbitrary shape [*].
+
+        Returns:
+            torch.Tensor: Embedded tensor with shape [*, D].
+        """
+
         # x: Long indices -> [*, d_model]
         return self.emb(x).detach()
 
 
 class TemporalEmbedding(nn.Module):
-    """Calendar/time embedding with (hour, weekday, day, month[, minute]) components.
-
-    If embed_type='fixed', uses FixedEmbedding; else learnable nn.Embedding.
-    freq:
-      - 't' (minute) enables minute embedding
-      - 'h' (hourly), 'd' (daily), etc. match the original behavior
     """
+    Calendar-time embedding for discrete time features.
+
+    This layer embeds discrete calendar components (month, day, weekday, hour,
+    and optionally minute) and sums them to form a time embedding for each time step.
+
+    The embedding can be:
+        - fixed sinusoidal (embed_type="fixed"), or
+        - learned (embed_type != "fixed").
+
+    For minute-level frequency (freq="t"), an additional minute embedding is used.
+
+    Input:
+        x_mark: [B, T, K] integer time features with columns:
+            0: month   in [1..12] (often stored as [1..12] or [0..12] depending on preprocessing)
+            1: day     in [1..31]
+            2: weekday in [0..6]
+            3: hour    in [0..23]
+            4: minute  in [0..3]  (only if freq="t")
+
+    Returns:
+        t_emb: [B, T, D]
+    """
+
 
     def __init__(self, d_model: int, embed_type: str = "fixed", freq: str = "h") -> None:
         super().__init__()
@@ -112,6 +217,16 @@ class TemporalEmbedding(nn.Module):
         self.month_embed = embed_cls(month_size, d_model)
 
     def forward(self, x_mark: torch.Tensor) -> torch.Tensor:
+        """
+        Compute summed calendar embeddings.
+
+        Args:
+            x_mark (torch.Tensor): Integer calendar features of shape [B, T, K].
+
+        Returns:
+            torch.Tensor: Time embedding of shape [B, T, D].
+        """
+        
         # x_mark: [b, t, k] integer time features in columns:
         #   [:, :, 0]=month, [:, :, 1]=day, [:, :, 2]=weekday, [:, :, 3]=hour, [:, :, 4]=minute (if present)
         x_mark = x_mark.long()
@@ -127,7 +242,28 @@ class TemporalEmbedding(nn.Module):
 
 
 class TimeFeatureEmbedding(nn.Module):
-    """Linear projection of continuous time features (timeF mode)."""
+    """
+    Linear projection for continuous time features (timeF mode).
+
+    Some preprocessing pipelines represent time using continuous features
+    instead of discrete indices. This layer projects those continuous features
+    to the model dimension D.
+
+    The number of input features depends on the frequency (freq) and follows
+    the common "timeF" convention.
+
+    Args:
+        d_model (int): Embedding dimension.
+        embed_type (str): Kept for API parity (typically "timeF").
+        freq (str): Frequency identifier that selects input feature dimension.
+
+    Input:
+        x_mark: [B, T, d_in]
+
+    Returns:
+        t_emb: [B, T, D]
+    """
+
 
     def __init__(self, d_model: int, embed_type: str = "timeF", freq: str = "h") -> None:
         super().__init__()
@@ -148,14 +284,44 @@ class TimeFeatureEmbedding(nn.Module):
         self.proj = nn.Linear(d_inp, d_model, bias=False)
 
     def forward(self, x_mark: torch.Tensor) -> torch.Tensor:
+        """
+        Project continuous time features.
+
+        Args:
+            x_mark (torch.Tensor): Continuous time features of shape [B, T, d_in].
+
+        Returns:
+            torch.Tensor: Projected features of shape [B, T, D].
+        """
+
         return self.proj(x_mark)
 
 
 class DataEmbedding(nn.Module):
-    """Value + positional (+ optional time) embedding, mirroring the original DataEmbedding.
+    """
+    Combined embedding used by TimesNet-style models.
 
-    If x_mark is None: value + position.
-    Else: value + temporal(x_mark) + position.
+    This layer produces the final encoder input representation by summing:
+        (1) Token/value embedding of x
+        (2) Positional embedding (fixed sinusoidal)
+        (3) Optional temporal embedding derived from x_mark
+
+    A dropout is applied to the summed embedding.
+
+    Args:
+        c_in (int): Number of input features.
+        d_model (int): Embedding dimension.
+        embed (str): Temporal embedding type. If "timeF", uses continuous projection.
+            Otherwise uses discrete TemporalEmbedding (fixed or learned).
+        freq (str): Frequency string for temporal feature handling.
+        dropout (float): Dropout probability.
+
+    Input:
+        x: [B, T, C_in]
+        x_mark: Optional [B, T, K]
+
+    Returns:
+        z: [B, T, D]
     """
 
     def __init__(
@@ -180,7 +346,18 @@ class DataEmbedding(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor, x_mark: torch.Tensor | None) -> torch.Tensor:
-        # x: [b, t, c] ; returns [b, t, d_model]
+        """
+        Compute combined embeddings.
+
+        Args:
+            x (torch.Tensor): Input values with shape [B, T, C_in].
+            x_mark (Optional[torch.Tensor]): Optional time features with shape [B, T, K].
+                If None, only value + position embeddings are used.
+
+        Returns:
+            torch.Tensor: Embedded representation with shape [B, T, D].
+        """
+
         if x_mark is None:
             x = self.value_embedding(x) + self.position_embedding(x)
         else:
@@ -194,7 +371,21 @@ class DataEmbedding(nn.Module):
 
 # (Optional helpers from the original file; include if you later need them)
 class DataEmbeddingInverted(nn.Module):
-    """Inverted variant used by some repos (not required for TimesNet, kept for parity)."""
+    """
+    Inverted embedding variant (kept for compatibility).
+
+    Some repositories define an "inverted" embedding that treats the channel
+    dimension as the sequence dimension. This project does not require it for
+    TimesNetPure forecasting, but the implementation is kept to ease integration
+    with other models.
+
+    Input:
+        x: [B, T, C]
+        x_mark: Optional [B, T, K]
+
+    Returns:
+        z: [B, C', D] depending on concatenation and projection
+    """
 
     def __init__(
         self,
@@ -219,7 +410,20 @@ class DataEmbeddingInverted(nn.Module):
 
 
 class DataEmbeddingWithoutPos(nn.Module):
-    """Value (+ optional time) embedding without positional term."""
+    """
+    Embedding without positional encoding.
+
+    This layer is identical to DataEmbedding except that it does not add the
+    sinusoidal positional term. It can be useful for ablations or for models that
+    handle positional information differently.
+
+    Input:
+        x: [B, T, C_in]
+        x_mark: Optional [B, T, K]
+
+    Returns:
+        z: [B, T, D]
+    """
 
     def __init__(
         self,
@@ -242,6 +446,17 @@ class DataEmbeddingWithoutPos(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor, x_mark: torch.Tensor | None) -> torch.Tensor:
+        """
+        Compute embeddings without positional encoding.
+
+        Args:
+            x (torch.Tensor): Input values with shape [B, T, C_in].
+            x_mark (Optional[torch.Tensor]): Optional time features with shape [B, T, K].
+
+        Returns:
+            torch.Tensor: Embedded representation with shape [B, T, D].
+        """
+
         if x_mark is None:
             out = self.value_embedding(x)
         else:
@@ -255,13 +470,24 @@ class DataEmbeddingWithoutPos(nn.Module):
 
 
 class InceptionBlockV1(nn.Module):
-    """TimesNet Inception block (V1).
+    """
+    Inception-style 2D convolution block (V1) used in TimesNet.
 
-    Builds num_kernels parallel Conv2d branches with odd kernel sizes
-    (1, 3, 5, ...), concatenates results via a stack-and-mean reduction.
+    This block applies multiple Conv2D branches with odd kernel sizes
+    (1, 3, 5, ...) in parallel, then aggregates the branch outputs by averaging.
+    It provides multi-scale receptive fields without changing spatial resolution.
 
-    Input : [b, in_ch, h, w]
-    Output: [b, out_ch, h, w]
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels for each branch.
+        num_kernels (int): Number of parallel convolution branches.
+        init_weight (bool): If True, applies Kaiming initialization.
+
+    Input:
+        x: [B, C_in, H, W]
+
+    Returns:
+        y: [B, C_out, H, W]
     """
 
     def __init__(
@@ -296,6 +522,16 @@ class InceptionBlockV1(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply parallel Conv2D branches and aggregate by mean.
+
+        Args:
+            x (torch.Tensor): Input feature map with shape [B, C_in, H, W].
+
+        Returns:
+            torch.Tensor: Output feature map with shape [B, C_out, H, W].
+        """
+
         # Parallel convs, then mean over the branch dimension
         res_list = [k(x) for k in self.kernels]  # list of [b, out_ch, h, w]
         res = torch.stack(res_list, dim=-1).mean(
@@ -305,13 +541,27 @@ class InceptionBlockV1(nn.Module):
 
 
 class InceptionBlockV2(nn.Module):
-    """TimesNet Inception block (V2).
+    """
+    Inception-style 2D convolution block (V2).
 
-    Uses separable rectangular kernels: [1, k] and [k, 1] pairs, plus a 1x1 conv.
-    Total branches = (num_kernels // 2) * 2 + 1.
+    This variant uses separable rectangular kernels:
+        - (1, k) and (k, 1) pairs for multiple k values
+        - an additional 1x1 convolution branch
 
-    Input : [b, in_ch, h, w]
-    Output: [b, out_ch, h, w]
+    Branch outputs are aggregated by averaging. This design can reduce parameters
+    while preserving multi-scale receptive fields.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels per branch.
+        num_kernels (int): Controls number of rectangular branches.
+        init_weight (bool): If True, applies Kaiming initialization.
+
+    Input:
+        x: [B, C_in, H, W]
+
+    Returns:
+        y: [B, C_out, H, W]
     """
 
     def __init__(
@@ -363,6 +613,16 @@ class InceptionBlockV2(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply rectangular/separable Conv2D branches and aggregate by mean.
+
+        Args:
+            x (torch.Tensor): Input feature map with shape [B, C_in, H, W].
+
+        Returns:
+            torch.Tensor: Output feature map with shape [B, C_out, H, W].
+        """
+
         res_list = [k(x) for k in self.kernels]
         res = torch.stack(res_list, dim=-1).mean(dim=-1)
         return res
