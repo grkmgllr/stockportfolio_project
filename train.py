@@ -57,7 +57,7 @@ class TrainingConfig:
     ticker: str = "AAPL"
     data_root: str = "data/raw"
     seq_len: int = 30       # 30 days lookback
-    pred_len: int = 1       # 5 days forecast
+    pred_len: int = 1       # forecast horizon
     
     # Training hyperparameters
     batch_size: int = 32
@@ -79,18 +79,18 @@ class TrainingConfig:
     checkpoint_dir: str = "checkpoints"
 
 
-def get_model_config(model_name: str, seq_len: int, pred_len: int):
+def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int = 5):
     """
-    Get model config for Yahoo stock prediction.
+    Get model config for stock price prediction.
     
-    Input: OHLCV (5 features)
+    Input: OHLCV or OHLCV+Vwap+Transactions (enc_in features)
     Output: High, Close (2 features)
     """
     if model_name == "TimesNetPure":
         return TimesNetForecastConfig(
             seq_len=seq_len,
             pred_len=pred_len,
-            enc_in=5,       # OHLCV
+            enc_in=enc_in,
             c_out=2,        # High, Close
             d_model=32,
             d_ff=64,
@@ -100,13 +100,11 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int):
             dropout=0.1,
         )
     elif model_name == "TimeMixer":
-        # Adjust downsampling layers based on seq_len divisibility
-        # seq_len must be divisible by 2^number_of_downsampling_layers
         n_layers = 1 if seq_len % 4 != 0 else 2
         return TimeMixerConfig(
             historical_lookback_length=seq_len,
             forecast_horizon_length=pred_len,
-            number_of_input_features=5,     # OHLCV
+            number_of_input_features=enc_in,
             number_of_output_features=2,    # High, Close
             model_embedding_dimension=64,
             feedforward_hidden_dimension=128,
@@ -137,8 +135,8 @@ def print_config(train_cfg: TrainingConfig, model_cfg) -> None:
     print(f"Ticker: {train_cfg.ticker}")
     print(f"Model: {train_cfg.model_name}")
     print(f"Device: {train_cfg.device}")
-    print(f"\nTask: Predict High/Close from OHLCV")
-    print(f"  Input:  OHLCV ({model_cfg.enc_in} features)")
+    print(f"\nTask: Predict High/Close")
+    print(f"  Input:  {model_cfg.enc_in} features")
     print(f"  Output: High, Close ({model_cfg.c_out} features)")
     print(f"  Lookback: {model_cfg.seq_len} days")
     print(f"  Forecast: {model_cfg.pred_len} days")
@@ -263,16 +261,10 @@ def main():
     if args.device:
         train_cfg.device = args.device
     
-    # Get model config
-    model_cfg = get_model_config(train_cfg.model_name, train_cfg.seq_len, train_cfg.pred_len)
-    
-    # Print configuration
-    print_config(train_cfg, model_cfg)
-    
     # Create checkpoint directory
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
     
-    # Load datasets
+    # Load datasets first so we can read enc_in from the data
     print("Loading Data...")
     train_dataset = YahooDataset(
         ticker=train_cfg.ticker,
@@ -288,6 +280,15 @@ def main():
         seq_len=train_cfg.seq_len,
         pred_len=train_cfg.pred_len,
     )
+    
+    # Get model config (enc_in auto-detected from dataset: 5 or 7)
+    model_cfg = get_model_config(
+        train_cfg.model_name, train_cfg.seq_len, train_cfg.pred_len,
+        enc_in=train_dataset.enc_in,
+    )
+    
+    # Print configuration
+    print_config(train_cfg, model_cfg)
     
     train_loader = DataLoader(
         train_dataset,

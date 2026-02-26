@@ -1,7 +1,7 @@
 """
-Yahoo Finance Dataset for stock price forecasting.
+Parquet Dataset for stock price forecasting.
 
-Input: OHLCV (Open, High, Low, Close, Volume) - 5 features
+Input: OHLCV + optional Vwap/Transactions (5-7 features)
 Output: High, Close predictions - 2 features
 """
 import torch
@@ -13,19 +13,20 @@ import os
 from typing import List, Optional, Literal
 
 
-class YahooDataset(Dataset):
+class ParquetDataset(Dataset):
     """
-    Dataset for Yahoo Finance stock data.
+    Dataset for Parquet stock data.
     
     Predicts High and Close prices from OHLCV input for short-term forecasting.
     Uses date-based splits for proper time series handling.
     
     Input features: Open, High, Low, Close, Volume (5 features)
+                    + Vwap, Transactions (7 features, when available)
     Output targets: High, Close (2 features)
     """
     
-    # Column names in Yahoo Finance data
     OHLCV_COLUMNS = ['Open', 'High', 'Low', 'Close', 'Volume']
+    EXTENDED_COLUMNS = ['Open', 'High', 'Low', 'Close', 'Volume', 'Vwap', 'Transactions']
     DEFAULT_TARGETS = ['High', 'Close']
     
     def __init__(
@@ -61,7 +62,8 @@ class YahooDataset(Dataset):
         self.pred_len = pred_len
         self.scale = scale
         
-        # Default features
+        # Default features (resolved in _load_data after reading the CSV)
+        self._input_features_override = input_features
         self.input_features = input_features or self.OHLCV_COLUMNS.copy()
         self.target_features = target_features or self.DEFAULT_TARGETS.copy()
         
@@ -98,7 +100,8 @@ class YahooDataset(Dataset):
         if not os.path.exists(file_path):
             raise FileNotFoundError(
                 f"Data file not found: {file_path}\n"
-                f"Run: python scripts/fetch_data.py to download data first."
+                f"Run: python scripts/fetch_data.py or "
+                f"python scripts/resample_parquet.py to prepare data first."
             )
         
         df_raw = pd.read_csv(file_path)
@@ -106,15 +109,25 @@ class YahooDataset(Dataset):
         # Handle missing values with forward fill then backward fill
         df_raw = df_raw.ffill().bfill()
         
+        # Auto-detect extended columns (Vwap, Transactions) when no
+        # explicit input_features were provided by the caller.
+        if self._input_features_override is None:
+            has_extended = all(c in df_raw.columns for c in self.EXTENDED_COLUMNS)
+            if has_extended:
+                self.input_features = self.EXTENDED_COLUMNS.copy()
+        
         # Validate required columns exist
         missing_cols = set(self.input_features) - set(df_raw.columns)
         if missing_cols:
             raise ValueError(f"Missing columns in data: {missing_cols}")
         
-        # Extract input features (OHLCV)
+        # Re-resolve target indices after potential feature list change
+        self.target_indices = [self.input_features.index(tf) for tf in self.target_features]
+        
+        # Extract input features
         df_input = df_raw[self.input_features].copy()
         
-        # Extract target features (High, Low)
+        # Extract target features (High, Close)
         df_target = df_raw[self.target_features].copy()
         
         # Calculate split boundaries
@@ -195,3 +208,7 @@ class YahooDataset(Dataset):
     def c_out(self) -> int:
         """Number of output features (for model config)."""
         return self.n_target_features
+
+
+# Backward-compatible alias
+YahooDataset = ParquetDataset

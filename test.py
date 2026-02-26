@@ -43,7 +43,7 @@ class TestConfig:
         checkpoint_dir: Directory containing saved checkpoints
         device: Compute device (auto-detected if not specified)
     """
-    model_name: Literal["TimeMixer", "TimesNetPure"] = "TimesNetPure"
+    model_name: Literal["TimeMixer", "TimesNetPure"] = "TimeMixer"
     ticker: str = "AAPL"
     data_root: str = "data/raw"
     seq_len: int = 30
@@ -57,13 +57,13 @@ class TestConfig:
     ))
 
 
-def get_model_config(model_name: str, seq_len: int, pred_len: int):
-    """Get model config for Yahoo stock prediction."""
+def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int = 5):
+    """Get model config for stock price prediction."""
     if model_name == "TimesNetPure":
         return TimesNetForecastConfig(
             seq_len=seq_len,
             pred_len=pred_len,
-            enc_in=5,
+            enc_in=enc_in,
             c_out=2,
             d_model=32,
             d_ff=64,
@@ -77,7 +77,7 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int):
         return TimeMixerConfig(
             historical_lookback_length=seq_len,
             forecast_horizon_length=pred_len,
-            number_of_input_features=5,
+            number_of_input_features=enc_in,
             number_of_output_features=2,
             model_embedding_dimension=64,
             feedforward_hidden_dimension=128,
@@ -192,9 +192,6 @@ def main():
     if args.device:
         test_cfg.device = args.device
     
-    # Get model config
-    model_cfg = get_model_config(test_cfg.model_name, test_cfg.seq_len, test_cfg.pred_len)
-    
     print("\n" + "=" * 60)
     print("Stock Price Forecasting - Evaluation")
     print("=" * 60)
@@ -204,7 +201,7 @@ def main():
     print(f"Lookback: {test_cfg.seq_len} days | Forecast: {test_cfg.pred_len} days")
     print("=" * 60 + "\n")
     
-    # Load test dataset
+    # Load test dataset first so we can read enc_in from the data
     print("Loading Test Data...")
     test_dataset = YahooDataset(
         ticker=test_cfg.ticker,
@@ -222,6 +219,12 @@ def main():
     )
     
     print(f"Test samples: {len(test_dataset)}\n")
+    
+    # Get model config (enc_in auto-detected from dataset: 5 or 7)
+    model_cfg = get_model_config(
+        test_cfg.model_name, test_cfg.seq_len, test_cfg.pred_len,
+        enc_in=test_dataset.enc_in,
+    )
     
     # Create model
     model = get_model(test_cfg.model_name, model_cfg).to(test_cfg.device)

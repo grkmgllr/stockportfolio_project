@@ -23,12 +23,20 @@ venv/
 data/
 *.csv
 *.npy
+*.parquet
 
-# Model checkpoints
+# Model checkpoints and artifacts
 checkpoints/
 *.pt
 *.pth
 *.ckpt
+*.joblib
+
+# Results / predictions
+results/
+
+# Docs	
+docs/
 
 # Jupyter notebooks
 .ipynb_checkpoints/

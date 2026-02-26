@@ -8,3 +8,7 @@ jupyter
 seaborn
 beartype
 torchtyping
+pyarrow
+lightgbm
+scipy
+joblib
