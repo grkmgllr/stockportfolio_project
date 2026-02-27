@@ -1,6 +1,6 @@
 """
 Training script for stock price forecasting.
-Predicts High/Close from OHLCV data using TimeMixer or TimesNetPure.
+Predicts High/Close from OHLCV data using TimeMixer or TimesNet.
 
 Usage:
     python train.py --ticker AAPL
@@ -22,7 +22,7 @@ from utils import EarlyStopping, get_scheduler, calculate_metrics
 # Import models
 from models import (
     TimeMixer, TimeMixerConfig,
-    TimesNetForecastModel, TimesNetForecastConfig,
+    TimesNetModel, TimesNetConfig,
 )
 
 
@@ -35,7 +35,7 @@ class TrainingConfig:
     to predict High/Close prices from OHLCV input data.
     
     Attributes:
-        model_name: Model architecture ('TimeMixer' or 'TimesNetPure')
+        model_name: Model architecture ('TimeMixer' or 'TimesNet')
         ticker: Stock ticker symbol (e.g., 'AAPL', 'MSFT')
         data_root: Directory containing {ticker}.csv files
         seq_len: Number of historical days to use as input (lookback window)
@@ -51,7 +51,7 @@ class TrainingConfig:
         checkpoint_dir: Directory to save model checkpoints
     """
     # Model selection
-    model_name: Literal["TimeMixer", "TimesNetPure"] = "TimesNetPure"
+    model_name: Literal["TimeMixer", "TimesNet"] = "TimesNet"
     
     # Data configuration
     ticker: str = "AAPL"
@@ -86,18 +86,22 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int =
     Input: OHLCV or OHLCV+Vwap+Transactions (enc_in features)
     Output: High, Close (2 features)
     """
-    if model_name == "TimesNetPure":
-        return TimesNetForecastConfig(
+    if model_name == "TimesNet":
+        return TimesNetConfig(
+            task_name="long_term_forecast",
             seq_len=seq_len,
             pred_len=pred_len,
-            enc_in=enc_in,
-            c_out=2,        # High, Close
+            enc_in=enc_in,      # OHLCV
+            c_out=2,       # High, Close
             d_model=32,
             d_ff=64,
             e_layers=2,
             top_k=3,
             num_kernels=6,
+            embed="fixed",
+            freq="h",
             dropout=0.1,
+            num_class=2,
         )
     elif model_name == "TimeMixer":
         n_layers = 1 if seq_len % 4 != 0 else 2
@@ -119,8 +123,8 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int =
 
 def get_model(model_name: str, config):
     """Create model instance from config."""
-    if model_name == "TimesNetPure":
-        return TimesNetForecastModel(config)
+    if model_name == "TimesNet":
+        return TimesNetModel(config)
     elif model_name == "TimeMixer":
         return TimeMixer(config)
     else:
@@ -210,9 +214,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="TimesNetPure",
-        choices=["TimeMixer", "TimesNetPure"],
-        help="Model to train (default: TimesNetPure)",
+        default="TimesNet",
+        choices=["TimeMixer", "TimesNet"],
+        help="Model to train (default: TimesNet)",
     )
     
     # Sequence lengths

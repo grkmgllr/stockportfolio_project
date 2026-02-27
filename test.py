@@ -21,7 +21,7 @@ from utils import load_checkpoint, calculate_metrics
 # Import models
 from models import (
     TimeMixer, TimeMixerConfig,
-    TimesNetForecastModel, TimesNetForecastConfig,
+    TimesNetModel, TimesNetConfig,
 )
 
 
@@ -43,7 +43,7 @@ class TestConfig:
         checkpoint_dir: Directory containing saved checkpoints
         device: Compute device (auto-detected if not specified)
     """
-    model_name: Literal["TimeMixer", "TimesNetPure"] = "TimeMixer"
+    model_name: Literal["TimeMixer", "TimesNet"] = "TimeMixer"
     ticker: str = "AAPL"
     data_root: str = "data/raw"
     seq_len: int = 30
@@ -59,18 +59,23 @@ class TestConfig:
 
 def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int = 5):
     """Get model config for stock price prediction."""
-    if model_name == "TimesNetPure":
-        return TimesNetForecastConfig(
+    if model_name == "TimesNet":
+        return TimesNetConfig(
+            task_name="long_term_forecast",
             seq_len=seq_len,
             pred_len=pred_len,
-            enc_in=enc_in,
-            c_out=2,
+            enc_in=5,      # OHLCV
+            c_out=2,       # High, Close
             d_model=32,
             d_ff=64,
             e_layers=2,
             top_k=3,
             num_kernels=6,
+            embed="fixed",
+            freq="h",
             dropout=0.1,
+            eps=1e-5,
+            num_class=2,
         )
     elif model_name == "TimeMixer":
         n_layers = 1 if seq_len % 4 != 0 else 2
@@ -92,8 +97,8 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int =
 
 def get_model(model_name: str, config):
     """Create model instance from config."""
-    if model_name == "TimesNetPure":
-        return TimesNetForecastModel(config)
+    if model_name == "TimesNet":
+        return TimesNetModel(config)
     elif model_name == "TimeMixer":
         return TimeMixer(config)
     else:
@@ -161,8 +166,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--ticker", type=str, default="AAPL", help="Stock ticker")
-    parser.add_argument("--model", type=str, default="TimesNetPure", 
-                        choices=["TimeMixer", "TimesNetPure"])
+    parser.add_argument("--model", type=str, default="TimesNet", 
+                        choices=["TimeMixer", "TimesNet"])
     parser.add_argument("--seq_len", type=int, default=30)
     parser.add_argument("--pred_len", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=32)

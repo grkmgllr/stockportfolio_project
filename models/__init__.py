@@ -1,12 +1,12 @@
 # Models package
 from .base import ForecastModel
 from .TimeMixer import TimeMixer, TimeMixerConfig
-from .TimesNetPure import TimesNetForecastModel, TimesNetForecastConfig
+from .TimesNet import TimesNetModel, TimesNetConfig
 
 __all__ = [
     "ForecastModel",
     "TimeMixer",
     "TimeMixerConfig",
-    "TimesNetForecastModel",
-    "TimesNetForecastConfig",
+    "TimesNetModel",
+    "TimesNetConfig",
 ]

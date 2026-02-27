@@ -38,7 +38,7 @@ class ForecastModel(ABC, torch.nn.Module):
 
     Outputs:
         y_pred : torch.Tensor
-            Shape [B, T_out, C]
+            Shape [B, T_out, C_out]
             where T_out is the forecast horizon length.
 
     Notes
@@ -81,8 +81,9 @@ class ForecastModel(ABC, torch.nn.Module):
                 a tensor of shape [B, T_out, C].
 
         Raises:
-            NotImplementedError:
-                If the subclass does not implement this method.
+            TypeError
+                If a subclass does not implement this method, Python prevents the subclass
+                from being instantiated due to the abstract base class contract.
         """
         raise NotImplementedError
 
@@ -95,9 +96,9 @@ class ForecastModel(ABC, torch.nn.Module):
 
         Args:
             preds (torch.Tensor):
-                Model predictions with shape [B, T_out, C].
+                Model predictions with shape [B, T_out, C_out].
             targets (torch.Tensor):
-                Ground-truth target values with shape [B, T_out, C].
+                Ground-truth target values with shape [B, T_out, C_out].
 
         Returns:
             torch.Tensor:
