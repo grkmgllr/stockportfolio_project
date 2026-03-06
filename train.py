@@ -1,10 +1,12 @@
 """
 Training script for stock price forecasting.
-Predicts High/Close from OHLCV data using TimeMixer or TimesNet.
+Predicts High/Close (+ optional EMA_20/SMA_50) from OHLCV data using
+TimeMixer or TimesNet.
 
 Usage:
     python train.py --ticker AAPL
     python train.py --ticker AAPL --model TimeMixer --epochs 100
+    python train.py --ticker AAPL --ma_targets EMA_20 SMA_50
 """
 import torch
 import torch.nn as nn
@@ -14,7 +16,7 @@ import time
 import os
 import argparse
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import List, Literal
 
 from dataset import YahooDataset
 from utils import EarlyStopping, get_scheduler, calculate_metrics
@@ -79,20 +81,21 @@ class TrainingConfig:
     checkpoint_dir: str = "checkpoints"
 
 
-def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int = 5):
+def get_model_config(model_name: str, seq_len: int, pred_len: int,
+                     enc_in: int = 5, c_out: int = 2):
     """
     Get model config for stock price prediction.
     
     Input: OHLCV or OHLCV+Vwap+Transactions (enc_in features)
-    Output: High, Close (2 features)
+    Output: High, Close + optional MA targets (c_out features)
     """
     if model_name == "TimesNet":
         return TimesNetConfig(
             task_name="long_term_forecast",
             seq_len=seq_len,
             pred_len=pred_len,
-            enc_in=enc_in,      # OHLCV
-            c_out=2,       # High, Close
+            enc_in=enc_in,
+            c_out=c_out,
             d_model=32,
             d_ff=64,
             e_layers=2,
@@ -101,7 +104,7 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int =
             embed="fixed",
             freq="h",
             dropout=0.1,
-            num_class=2,
+            num_class=c_out,
         )
     elif model_name == "TimeMixer":
         n_layers = 1 if seq_len % 4 != 0 else 2
@@ -109,7 +112,7 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int =
             historical_lookback_length=seq_len,
             forecast_horizon_length=pred_len,
             number_of_input_features=enc_in,
-            number_of_output_features=2,    # High, Close
+            number_of_output_features=c_out,
             model_embedding_dimension=64,
             feedforward_hidden_dimension=128,
             number_of_pdm_blocks=2,
@@ -131,7 +134,8 @@ def get_model(model_name: str, config):
         raise ValueError(f"Unknown model: {model_name}")
 
 
-def print_config(train_cfg: TrainingConfig, model_cfg) -> None:
+def print_config(train_cfg: TrainingConfig, model_cfg,
+                 target_names: List[str]) -> None:
     """Print configuration summary."""
     print("\n" + "=" * 60)
     print("Stock Price Forecasting - Training Configuration")
@@ -139,9 +143,10 @@ def print_config(train_cfg: TrainingConfig, model_cfg) -> None:
     print(f"Ticker: {train_cfg.ticker}")
     print(f"Model: {train_cfg.model_name}")
     print(f"Device: {train_cfg.device}")
-    print(f"\nTask: Predict High/Close")
+    targets_str = ", ".join(target_names)
+    print(f"\nTask: Predict {targets_str}")
     print(f"  Input:  {model_cfg.enc_in} features")
-    print(f"  Output: High, Close ({model_cfg.c_out} features)")
+    print(f"  Output: {targets_str} ({model_cfg.c_out} features)")
     print(f"  Lookback: {model_cfg.seq_len} days")
     print(f"  Forecast: {model_cfg.pred_len} days")
     print(f"\nTraining:")
@@ -235,6 +240,10 @@ def parse_args() -> argparse.Namespace:
     # Data
     parser.add_argument("--data_root", type=str, default="data/raw", help="Data directory")
 
+    # MA targets
+    parser.add_argument("--ma_targets", nargs="*", default=None,
+                        help="Moving-average targets to predict (e.g. EMA_20 SMA_50)")
+
     # Runtime
     parser.add_argument("--device", type=str, default=None, choices=["cpu", "cuda", "mps"])
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
@@ -268,7 +277,9 @@ def main():
     # Create checkpoint directory
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
     
-    # Load datasets first so we can read enc_in from the data
+    ma_targets = args.ma_targets or []
+
+    # Load datasets first so we can read enc_in / c_out from the data
     print("Loading Data...")
     train_dataset = YahooDataset(
         ticker=train_cfg.ticker,
@@ -276,6 +287,7 @@ def main():
         flag='train',
         seq_len=train_cfg.seq_len,
         pred_len=train_cfg.pred_len,
+        ma_targets=ma_targets,
     )
     val_dataset = YahooDataset(
         ticker=train_cfg.ticker,
@@ -283,16 +295,18 @@ def main():
         flag='val',
         seq_len=train_cfg.seq_len,
         pred_len=train_cfg.pred_len,
+        ma_targets=ma_targets,
     )
     
-    # Get model config (enc_in auto-detected from dataset: 5 or 7)
+    # Get model config (enc_in and c_out auto-detected from dataset)
     model_cfg = get_model_config(
         train_cfg.model_name, train_cfg.seq_len, train_cfg.pred_len,
         enc_in=train_dataset.enc_in,
+        c_out=train_dataset.c_out,
     )
     
     # Print configuration
-    print_config(train_cfg, model_cfg)
+    print_config(train_cfg, model_cfg, train_dataset.target_features)
     
     train_loader = DataLoader(
         train_dataset,

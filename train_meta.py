@@ -40,11 +40,15 @@ FEATURE_COLUMNS = [
 ]
 
 # Additional features included when available in the CSV
-# (present when the data was resampled from minute-bar parquet).
+# (present when the data was resampled from minute-bar parquet,
+#  or when the model was trained with MA targets).
 OPTIONAL_FEATURE_COLUMNS = [
     "Vwap",
     "Transactions",
     "daily_vol",
+    "pred_ema20_vs_close",
+    "pred_sma50_vs_close",
+    "pred_ma_crossover",
 ]
 
 TARGET_COLUMN = "meta_label"

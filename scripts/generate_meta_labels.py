@@ -2,8 +2,8 @@
 Feature Engineering bridge between the primary model and the meta-classifier.
 
 This script transforms the raw output of TimeMixer (predicted High / Close
-saved as ``.npy`` by ``test.py --save_predictions``) into a training-ready
-CSV for the LightGBM meta-classifier.
+/ optional MAs saved as ``.npy`` by ``test.py --save_predictions``) into a
+training-ready CSV for the LightGBM meta-classifier.
 
 Pipeline
 --------
@@ -19,6 +19,8 @@ Pipeline
    about the *regime* at the time of the signal:
        - Volatility:  ATR, rolling standard deviation of returns.
        - Momentum:    RSI, MACD line, MACD signal, MACD histogram.
+       - Trend (when MA targets present): predicted EMA_20 / SMA_50 vs
+         current close, predicted MA crossover direction.
 6. Drop rows with NaN (warm-up period of the rolling indicators) and save the
    combined DataFrame as ``data/meta/meta_labels_{ticker}.csv``.
 
@@ -26,6 +28,7 @@ Usage
 -----
     python scripts/generate_meta_labels.py --ticker AAPL
     python scripts/generate_meta_labels.py --ticker AAPL --pred_len 5 --seq_len 30
+    python scripts/generate_meta_labels.py --ticker AAPL --target_names High Close EMA_20 SMA_50
 """
 
 import pandas as pd
@@ -184,6 +187,7 @@ def build_meta_dataset(
     vol_lookback: int = 20,
     sl_multiplier: float = 2.0,
     vertical_barrier_periods: int = 5,
+    target_names=None,
 ) -> pd.DataFrame:
     """
     Build the complete meta-labeling dataset for a single ticker.
@@ -227,6 +231,10 @@ def build_meta_dataset(
             Stop-loss width in daily-volatility units.
         vertical_barrier_periods (int):
             Maximum holding period for the triple barrier.
+        target_names (list[str] | None):
+            Ordered names of the prediction targets that ``test.py``
+            produced (e.g. ``['High', 'Close', 'EMA_20', 'SMA_50']``).
+            Defaults to ``['High', 'Close']`` for backward compatibility.
 
     Returns:
         pd.DataFrame:
@@ -238,6 +246,21 @@ def build_meta_dataset(
         FileNotFoundError:
             If the raw CSV or the ``.npy`` prediction files are missing.
     """
+    if target_names is None:
+        target_names = ["High", "Close"]
+
+    # Build index lookup for the prediction tensor
+    target_idx = {name: i for i, name in enumerate(target_names)}
+
+    if "High" not in target_idx or "Close" not in target_idx:
+        raise ValueError(
+            "target_names must contain at least 'High' and 'Close'. "
+            f"Got: {target_names}"
+        )
+
+    has_ema20 = "EMA_20" in target_idx
+    has_sma50 = "SMA_50" in target_idx
+
     # ── 1. Load raw OHLCV ──
     csv_path = os.path.join(data_root, f"{ticker}.csv")
     if not os.path.exists(csv_path):
@@ -260,29 +283,32 @@ def build_meta_dataset(
             f"Run: python test.py --ticker {ticker} --save_predictions first."
         )
 
-    preds = np.load(pred_path)   # [N_test, pred_len, 2]  (High, Close)
-    trues = np.load(true_path)   # [N_test, pred_len, 2]
+    preds = np.load(pred_path)   # [N_test, pred_len, n_targets]
+    trues = np.load(true_path)   # [N_test, pred_len, n_targets]
 
     n_test = preds.shape[0]
 
     # ── 3. Align prediction indices with the raw CSV ──
     val_end = int(total_len * (train_ratio + val_ratio))
 
-    # For each test sample i, the entry bar is the last bar of the input
-    # window: val_end + i + seq_len - 1.
-    # The target window starts at val_end + i + seq_len.
     entry_indices = np.arange(n_test) + val_end + seq_len - 1
 
-    # For multi-step horizons, take the *max* predicted High across the
-    # horizon as the take-profit target (most optimistic level the model
-    # expects within the holding period).
-    pred_high = preds[:, :, 0].max(axis=1)   # [N_test]
-    pred_close = preds[:, -1, 1]              # last-step close prediction
+    hi = target_idx["High"]
+    ci = target_idx["Close"]
+
+    pred_high = preds[:, :, hi].max(axis=1)   # [N_test]
+    pred_close = preds[:, -1, ci]              # last-step close prediction
 
     # Build a DataFrame aligned to entry bars
     df_entry = df_raw.iloc[entry_indices].reset_index(drop=True)
     df_entry["pred_high"] = pred_high
     df_entry["pred_close"] = pred_close
+
+    # Extract last-step MA predictions when available
+    if has_ema20:
+        df_entry["pred_ema20"] = preds[:, -1, target_idx["EMA_20"]]
+    if has_sma50:
+        df_entry["pred_sma50"] = preds[:, -1, target_idx["SMA_50"]]
 
     # ── 4. Apply Triple Barrier ──
     df_labeled = apply_triple_barrier(
@@ -312,6 +338,20 @@ def build_meta_dataset(
     df_labeled["pred_return"] = (df_labeled["pred_high"] / close) - 1.0
     df_labeled["pred_close_return"] = (df_labeled["pred_close"] / close) - 1.0
 
+    # MA-derived trend features (only when MA targets were predicted)
+    if has_ema20:
+        df_labeled["pred_ema20_vs_close"] = (
+            df_labeled["pred_ema20"] / close
+        ) - 1.0
+    if has_sma50:
+        df_labeled["pred_sma50_vs_close"] = (
+            df_labeled["pred_sma50"] / close
+        ) - 1.0
+    if has_ema20 and has_sma50:
+        df_labeled["pred_ma_crossover"] = (
+            df_labeled["pred_ema20"] - df_labeled["pred_sma50"]
+        )
+
     # ── 6. Drop warm-up NaNs ──
     n_before = len(df_labeled)
     df_labeled = df_labeled.dropna().reset_index(drop=True)
@@ -337,6 +377,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sl_multiplier", type=float, default=2.0)
     parser.add_argument("--vertical_barrier", type=int, default=5)
     parser.add_argument("--output_dir", type=str, default="data/meta")
+    parser.add_argument("--target_names", nargs="*", default=None,
+                        help="Ordered target names matching the .npy shape "
+                             "(e.g. High Close EMA_20 SMA_50)")
     return parser.parse_args()
 
 
@@ -346,9 +389,12 @@ def main():
     print("\n" + "=" * 60)
     print("Meta-Label Generation Pipeline")
     print("=" * 60)
+    target_names = args.target_names or ["High", "Close"]
+
     print(f"Ticker:          {args.ticker}")
     print(f"Seq len:         {args.seq_len}")
     print(f"Pred len:        {args.pred_len}")
+    print(f"Target names:    {target_names}")
     print(f"SL multiplier:   {args.sl_multiplier}x daily vol")
     print(f"Vertical barrier:{args.vertical_barrier} bars")
     print("=" * 60 + "\n")
@@ -364,6 +410,7 @@ def main():
         vol_lookback=args.vol_lookback,
         sl_multiplier=args.sl_multiplier,
         vertical_barrier_periods=args.vertical_barrier,
+        target_names=target_names,
     )
 
     # ── Save ──
@@ -385,7 +432,9 @@ def main():
 
     feature_cols = ["atr", "rolling_vol", "rsi", "macd_line", "macd_signal",
                     "macd_hist", "pred_return", "pred_close_return"]
-    for extra in ["Vwap", "Transactions"]:
+    for extra in ["Vwap", "Transactions",
+                  "pred_ema20_vs_close", "pred_sma50_vs_close",
+                  "pred_ma_crossover"]:
         if extra in df.columns:
             feature_cols.append(extra)
     print(f"\nFeature summary:")

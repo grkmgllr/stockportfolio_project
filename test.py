@@ -1,10 +1,11 @@
 """
 Testing/Evaluation script for stock price forecasting.
-Evaluates High/Close predictions from OHLCV data.
+Evaluates High/Close (+ optional MA) predictions from OHLCV data.
 
 Usage:
     python test.py --ticker AAPL
     python test.py --ticker AAPL --model TimeMixer
+    python test.py --ticker AAPL --ma_targets EMA_20 SMA_50 --save_predictions
 """
 import torch
 import torch.nn as nn
@@ -13,7 +14,7 @@ import numpy as np
 import os
 import argparse
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import List, Literal
 
 from dataset import YahooDataset
 from utils import load_checkpoint, calculate_metrics
@@ -57,15 +58,16 @@ class TestConfig:
     ))
 
 
-def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int = 5):
+def get_model_config(model_name: str, seq_len: int, pred_len: int,
+                     enc_in: int = 5, c_out: int = 2):
     """Get model config for stock price prediction."""
     if model_name == "TimesNet":
         return TimesNetConfig(
             task_name="long_term_forecast",
             seq_len=seq_len,
             pred_len=pred_len,
-            enc_in=5,      # OHLCV
-            c_out=2,       # High, Close
+            enc_in=enc_in,
+            c_out=c_out,
             d_model=32,
             d_ff=64,
             e_layers=2,
@@ -74,8 +76,7 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int =
             embed="fixed",
             freq="h",
             dropout=0.1,
-            eps=1e-5,
-            num_class=2,
+            num_class=c_out,
         )
     elif model_name == "TimeMixer":
         n_layers = 1 if seq_len % 4 != 0 else 2
@@ -83,7 +84,7 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int, enc_in: int =
             historical_lookback_length=seq_len,
             forecast_horizon_length=pred_len,
             number_of_input_features=enc_in,
-            number_of_output_features=2,
+            number_of_output_features=c_out,
             model_embedding_dimension=64,
             feedforward_hidden_dimension=128,
             number_of_pdm_blocks=2,
@@ -109,7 +110,8 @@ def evaluate(model, test_loader, criterion, device, dataset):
     """
     Evaluate model on test set.
     
-    Returns predictions and ground truth in original scale.
+    Returns predictions and ground truth in original scale, with
+    per-target metrics keyed by the target feature name.
     """
     model.eval()
     
@@ -130,12 +132,10 @@ def evaluate(model, test_loader, criterion, device, dataset):
             all_preds.append(outputs.cpu().numpy())
             all_trues.append(batch_y.cpu().numpy())
     
-    # Concatenate all batches
-    all_preds = np.concatenate(all_preds, axis=0)  # [N, pred_len, 2]
-    all_trues = np.concatenate(all_trues, axis=0)  # [N, pred_len, 2]
+    # Concatenate all batches: [N, pred_len, n_targets]
+    all_preds = np.concatenate(all_preds, axis=0)
+    all_trues = np.concatenate(all_trues, axis=0)
     
-    # Inverse transform to original scale
-    # Reshape for scaler: [N * pred_len, 2]
     n_samples, pred_len, n_features = all_preds.shape
     
     preds_flat = all_preds.reshape(-1, n_features)
@@ -144,19 +144,18 @@ def evaluate(model, test_loader, criterion, device, dataset):
     preds_original = dataset.inverse_transform_y(preds_flat).reshape(n_samples, pred_len, n_features)
     trues_original = dataset.inverse_transform_y(trues_flat).reshape(n_samples, pred_len, n_features)
     
-    # Calculate metrics on original scale
-    metrics = calculate_metrics(preds_original, trues_original)
-    
-    # Also calculate per-target metrics
-    high_metrics = calculate_metrics(preds_original[:, :, 0], trues_original[:, :, 0])
-    close_metrics = calculate_metrics(preds_original[:, :, 1], trues_original[:, :, 1])
-    
-    return {
-        'overall': metrics,
-        'high': high_metrics,
-        'close': close_metrics,
+    results = {
+        'overall': calculate_metrics(preds_original, trues_original),
         'test_loss': np.average(test_loss),
-    }, preds_original, trues_original
+    }
+
+    # Per-target metrics keyed by feature name
+    for i, name in enumerate(dataset.target_features):
+        results[name] = calculate_metrics(
+            preds_original[:, :, i], trues_original[:, :, i],
+        )
+    
+    return results, preds_original, trues_original
 
 
 def parse_args() -> argparse.Namespace:
@@ -176,6 +175,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     parser.add_argument("--device", type=str, default=None, choices=["cpu", "cuda", "mps"])
     parser.add_argument("--save_predictions", action="store_true")
+    parser.add_argument("--ma_targets", nargs="*", default=None,
+                        help="Moving-average targets to predict (e.g. EMA_20 SMA_50)")
 
     return parser.parse_args()
 
@@ -197,6 +198,8 @@ def main():
     if args.device:
         test_cfg.device = args.device
     
+    ma_targets = args.ma_targets or []
+
     print("\n" + "=" * 60)
     print("Stock Price Forecasting - Evaluation")
     print("=" * 60)
@@ -204,9 +207,11 @@ def main():
     print(f"Model: {test_cfg.model_name}")
     print(f"Device: {test_cfg.device}")
     print(f"Lookback: {test_cfg.seq_len} days | Forecast: {test_cfg.pred_len} days")
+    if ma_targets:
+        print(f"MA targets: {ma_targets}")
     print("=" * 60 + "\n")
     
-    # Load test dataset first so we can read enc_in from the data
+    # Load test dataset first so we can read enc_in / c_out from the data
     print("Loading Test Data...")
     test_dataset = YahooDataset(
         ticker=test_cfg.ticker,
@@ -214,6 +219,7 @@ def main():
         flag='test',
         seq_len=test_cfg.seq_len,
         pred_len=test_cfg.pred_len,
+        ma_targets=ma_targets,
     )
     
     test_loader = DataLoader(
@@ -225,10 +231,11 @@ def main():
     
     print(f"Test samples: {len(test_dataset)}\n")
     
-    # Get model config (enc_in auto-detected from dataset: 5 or 7)
+    # Get model config (enc_in and c_out auto-detected from dataset)
     model_cfg = get_model_config(
         test_cfg.model_name, test_cfg.seq_len, test_cfg.pred_len,
         enc_in=test_dataset.enc_in,
+        c_out=test_dataset.c_out,
     )
     
     # Create model
@@ -267,14 +274,11 @@ def main():
     print(f"  MSE:  {results['overall']['MSE']:.4f}")
     print(f"  MAE:  {results['overall']['MAE']:.4f}")
     print(f"  RMSE: {results['overall']['RMSE']:.4f}")
-    print(f"\nHigh Price Prediction:")
-    print(f"  MSE:  {results['high']['MSE']:.4f}")
-    print(f"  MAE:  {results['high']['MAE']:.4f}")
-    print(f"  RMSE: {results['high']['RMSE']:.4f}")
-    print(f"\nClose Price Prediction:")
-    print(f"  MSE:  {results['close']['MSE']:.4f}")
-    print(f"  MAE:  {results['close']['MAE']:.4f}")
-    print(f"  RMSE: {results['close']['RMSE']:.4f}")
+    for target_name in test_dataset.target_features:
+        print(f"\n{target_name} Prediction:")
+        print(f"  MSE:  {results[target_name]['MSE']:.4f}")
+        print(f"  MAE:  {results[target_name]['MAE']:.4f}")
+        print(f"  RMSE: {results[target_name]['RMSE']:.4f}")
     print("=" * 60)
     
     # Save predictions

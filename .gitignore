@@ -35,9 +35,6 @@ checkpoints/
 # Results / predictions
 results/
 
-# Docs	
-docs/
-
 # Jupyter notebooks
 .ipynb_checkpoints/
 

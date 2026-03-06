@@ -277,20 +277,25 @@ class TimesNetModel(ForecastModel):
             y_orig = y * stdev + means
         using the per-sample statistics computed by `_norm_ns_transformer`.
 
+        When c_out < enc_in (e.g. predicting High/Close from OHLCV), only
+        the first c_out channels of means/stdev are used.
+
         Args:
             y (torch.Tensor):
-                Normalized tensor of shape [B, T, C].
+                Normalized tensor of shape [B, T, c_out].
             means (torch.Tensor):
-                Per-sample mean of shape [B, 1, C].
+                Per-sample mean of shape [B, 1, enc_in].
             stdev (torch.Tensor):
-                Per-sample standard deviation of shape [B, 1, C].
+                Per-sample standard deviation of shape [B, 1, enc_in].
 
         Returns:
             torch.Tensor:
-                Denormalized tensor of shape [B, T, C].
+                Denormalized tensor of shape [B, T, c_out].
         """
-
-        return y * stdev[:, 0, :].unsqueeze(1) + means[:, 0, :].unsqueeze(1)
+        c_out = y.shape[-1]
+        s = stdev[:, 0, :c_out].unsqueeze(1)
+        m = means[:, 0, :c_out].unsqueeze(1)
+        return y * s + m
 
     # ---- tasks ----
 

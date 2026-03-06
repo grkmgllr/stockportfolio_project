@@ -2,7 +2,7 @@
 Parquet Dataset for stock price forecasting.
 
 Input: OHLCV + optional Vwap/Transactions (5-7 features)
-Output: High, Close predictions - 2 features
+Output: High, Close + optional moving average predictions
 """
 import torch
 from torch.utils.data import Dataset
@@ -10,24 +10,31 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 import os
-from typing import List, Optional, Literal
+from typing import Dict, List, Optional, Literal
 
 
 class ParquetDataset(Dataset):
     """
     Dataset for Parquet stock data.
     
-    Predicts High and Close prices from OHLCV input for short-term forecasting.
+    Predicts High and Close prices (and optionally moving averages) from
+    OHLCV input for short-term forecasting.
     Uses date-based splits for proper time series handling.
     
     Input features: Open, High, Low, Close, Volume (5 features)
                     + Vwap, Transactions (7 features, when available)
     Output targets: High, Close (2 features)
+                    + EMA_20, SMA_50 (4 features, when ma_targets enabled)
     """
     
     OHLCV_COLUMNS = ['Open', 'High', 'Low', 'Close', 'Volume']
     EXTENDED_COLUMNS = ['Open', 'High', 'Low', 'Close', 'Volume', 'Vwap', 'Transactions']
     DEFAULT_TARGETS = ['High', 'Close']
+    
+    MA_CONFIGS: Dict[str, dict] = {
+        'EMA_20': {'method': 'ema', 'period': 20},
+        'SMA_50': {'method': 'sma', 'period': 50},
+    }
     
     def __init__(
         self,
@@ -41,6 +48,7 @@ class ParquetDataset(Dataset):
         scale: bool = True,
         train_ratio: float = 0.7,
         val_ratio: float = 0.15,
+        ma_targets: Optional[List[str]] = None,
     ):
         """
         Args:
@@ -54,6 +62,8 @@ class ParquetDataset(Dataset):
             scale: Whether to apply StandardScaler
             train_ratio: Ratio of data for training (default: 0.7)
             val_ratio: Ratio of data for validation (default: 0.15)
+            ma_targets: List of MA target names to predict (e.g. ['EMA_20', 'SMA_50']).
+                        Keys must exist in MA_CONFIGS. Pass None or [] to disable.
         """
         self.ticker = ticker
         self.root_path = root_path
@@ -66,6 +76,15 @@ class ParquetDataset(Dataset):
         self._input_features_override = input_features
         self.input_features = input_features or self.OHLCV_COLUMNS.copy()
         self.target_features = target_features or self.DEFAULT_TARGETS.copy()
+        
+        # MA targets to append (validated later in _load_data)
+        self.ma_targets = ma_targets or []
+        for name in self.ma_targets:
+            if name not in self.MA_CONFIGS:
+                raise ValueError(
+                    f"Unknown MA target '{name}'. "
+                    f"Available: {list(self.MA_CONFIGS.keys())}"
+                )
         
         # Validate target features are in input features
         for tf in self.target_features:
@@ -93,6 +112,16 @@ class ParquetDataset(Dataset):
         
         self._load_data()
     
+    @staticmethod
+    def _compute_ma(close: pd.Series, method: str, period: int) -> pd.Series:
+        """Compute a moving average from the Close column."""
+        if method == 'sma':
+            return close.rolling(window=period, min_periods=period).mean()
+        elif method == 'ema':
+            return close.ewm(span=period, min_periods=period, adjust=False).mean()
+        else:
+            raise ValueError(f"Unknown MA method: {method}")
+
     def _load_data(self):
         """Load and preprocess the stock data."""
         file_path = os.path.join(self.root_path, f"{self.ticker}.csv")
@@ -109,6 +138,32 @@ class ParquetDataset(Dataset):
         # Handle missing values with forward fill then backward fill
         df_raw = df_raw.ffill().bfill()
         
+        # Compute moving-average target columns from Close before any
+        # splitting so the rolling windows see the full history.
+        for ma_name in self.ma_targets:
+            cfg = self.MA_CONFIGS[ma_name]
+            df_raw[ma_name] = self._compute_ma(
+                df_raw['Close'], cfg['method'], cfg['period'],
+            )
+        
+        # Trim leading NaN rows caused by MA warm-up.  The longest MA
+        # window determines how many rows to drop.
+        if self.ma_targets:
+            max_period = max(
+                self.MA_CONFIGS[n]['period'] for n in self.ma_targets
+            )
+            n_before = len(df_raw)
+            df_raw = df_raw.iloc[max_period - 1:].reset_index(drop=True)
+            if self.flag == 'train':
+                print(f"[{self.ticker}] Trimmed {n_before - len(df_raw)} "
+                      f"MA warm-up rows (max period={max_period})")
+        
+        # Append MA names to the target list (after base targets)
+        all_targets = self.target_features + [
+            n for n in self.ma_targets if n not in self.target_features
+        ]
+        self.target_features = all_targets
+        
         # Auto-detect extended columns (Vwap, Transactions) when no
         # explicit input_features were provided by the caller.
         if self._input_features_override is None:
@@ -122,12 +177,16 @@ class ParquetDataset(Dataset):
             raise ValueError(f"Missing columns in data: {missing_cols}")
         
         # Re-resolve target indices after potential feature list change
-        self.target_indices = [self.input_features.index(tf) for tf in self.target_features]
+        self.target_indices = [
+            self.input_features.index(tf)
+            for tf in self.target_features
+            if tf in self.input_features
+        ]
         
         # Extract input features
         df_input = df_raw[self.input_features].copy()
         
-        # Extract target features (High, Close)
+        # Extract target features (High, Close + optional MAs)
         df_target = df_raw[self.target_features].copy()
         
         # Calculate split boundaries
