@@ -1,9 +1,10 @@
 """
 Feature Engineering bridge between the primary model and the meta-classifier.
 
-This script transforms the raw output of TimeMixer (predicted High / Close
-/ optional MAs saved as ``.npy`` by ``test.py --save_predictions``) into a
-training-ready CSV for the LightGBM meta-classifier.
+This script transforms the raw output of the primary model (predicted
+High / Close / optional MAs saved as ``.npy`` by
+``test.py --save_predictions``) into a training-ready CSV for the
+LightGBM meta-classifier.
 
 Pipeline
 --------
@@ -180,8 +181,8 @@ def build_meta_dataset(
     ticker: str,
     data_root: str = "data/raw",
     results_dir: str = "results",
-    seq_len: int = 30,
-    pred_len: int = 1,
+    seq_len: int = 14,
+    pred_len: int = 5,
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
     vol_lookback: int = 20,
@@ -271,6 +272,20 @@ def build_meta_dataset(
         )
 
     df_raw = pd.read_csv(csv_path).ffill().bfill()
+
+    # When the model was trained with MA targets, ParquetDataset trims
+    # warm-up rows before splitting.  Replicate that trim here so
+    # val_end aligns with the dataset that produced the .npy files.
+    ma_names_in_targets = [n for n in (target_names or [])
+                           if n in ("EMA_20", "SMA_50")]
+    if ma_names_in_targets:
+        from dataset import ParquetDataset
+        ma_periods = [ParquetDataset.MA_CONFIGS[n]["period"]
+                      for n in ma_names_in_targets]
+        trim = max(ma_periods) - 1
+        df_raw = df_raw.iloc[trim:].reset_index(drop=True)
+        print(f"Trimmed {trim} MA warm-up rows to match dataset splits.")
+
     total_len = len(df_raw)
 
     # ── 2. Load predictions ──
@@ -364,7 +379,7 @@ def build_meta_dataset(
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Generate meta-labels and features from TimeMixer predictions."
+        description="Generate meta-labels and features from primary model predictions."
     )
     parser.add_argument("--ticker", type=str, default="AAPL")
     parser.add_argument("--data_root", type=str, default="data/raw")

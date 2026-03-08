@@ -5,7 +5,7 @@ Evaluates High/Close (+ optional MA) predictions from OHLCV data.
 Usage:
     python test.py --ticker AAPL
     python test.py --ticker AAPL --model TimeMixer
-    python test.py --ticker AAPL --ma_targets EMA_20 SMA_50 --save_predictions
+    python test.py --ticker AAPL --model LightGBM --ma_targets EMA_20 SMA_50 --save_predictions
 """
 import torch
 import torch.nn as nn
@@ -16,7 +16,9 @@ import argparse
 from dataclasses import dataclass, field
 from typing import List, Literal
 
-from dataset import YahooDataset
+import pandas as pd
+
+from dataset import ParquetDataset
 from utils import load_checkpoint, calculate_metrics
 
 # Import models
@@ -24,6 +26,7 @@ from models import (
     TimeMixer, TimeMixerConfig,
     TimesNetModel, TimesNetConfig,
 )
+from models.LightGBMForecaster import LightGBMForecaster
 
 
 @dataclass
@@ -44,11 +47,11 @@ class TestConfig:
         checkpoint_dir: Directory containing saved checkpoints
         device: Compute device (auto-detected if not specified)
     """
-    model_name: Literal["TimeMixer", "TimesNet"] = "TimeMixer"
+    model_name: Literal["TimeMixer", "TimesNet", "LightGBM"] = "TimesNet"
     ticker: str = "AAPL"
     data_root: str = "data/raw"
-    seq_len: int = 30
-    pred_len: int = 1
+    seq_len: int = 14
+    pred_len: int = 5
     batch_size: int = 32
     checkpoint_dir: str = "checkpoints"
     device: str = field(default_factory=lambda: (
@@ -166,7 +169,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--ticker", type=str, default="AAPL", help="Stock ticker")
     parser.add_argument("--model", type=str, default="TimesNet", 
-                        choices=["TimeMixer", "TimesNet"])
+                        choices=["TimeMixer", "TimesNet", "LightGBM"])
     parser.add_argument("--seq_len", type=int, default=30)
     parser.add_argument("--pred_len", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -181,10 +184,68 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-    
-    # Create config
+def print_results(results: dict, target_names: List[str]) -> None:
+    """Print evaluation metrics for all targets."""
+    print("\n" + "=" * 60)
+    print("TEST RESULTS (Original Scale)")
+    print("=" * 60)
+    print(f"\nOverall:")
+    print(f"  MSE:  {results['overall']['MSE']:.4f}")
+    print(f"  MAE:  {results['overall']['MAE']:.4f}")
+    print(f"  RMSE: {results['overall']['RMSE']:.4f}")
+    for name in target_names:
+        print(f"\n{name} Prediction:")
+        print(f"  MSE:  {results[name]['MSE']:.4f}")
+        print(f"  MAE:  {results[name]['MAE']:.4f}")
+        print(f"  RMSE: {results[name]['RMSE']:.4f}")
+    print("=" * 60)
+
+
+def save_predictions(ticker: str, preds: np.ndarray, trues: np.ndarray) -> None:
+    """Save predictions and ground truth as .npy files."""
+    output_dir = "results"
+    os.makedirs(output_dir, exist_ok=True)
+    np.save(os.path.join(output_dir, f"{ticker}_predictions.npy"), preds)
+    np.save(os.path.join(output_dir, f"{ticker}_ground_truth.npy"), trues)
+    print(f"\nPredictions saved to {output_dir}/")
+
+
+def _evaluate_lightgbm(args):
+    """Load and evaluate a LightGBM forecaster. Returns (preds, trues, target_names)."""
+    from train import _load_raw_df
+
+    ma_targets = args.ma_targets or []
+    df, train_end, val_end, target_features = _load_raw_df(
+        args.ticker, args.data_root, ma_targets,
+    )
+
+    if args.checkpoint:
+        checkpoint_path = args.checkpoint
+    else:
+        checkpoint_path = os.path.join(
+            args.checkpoint_dir,
+            f"{args.ticker}_LightGBM_best.joblib",
+        )
+
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {checkpoint_path}\n"
+            f"Run: python train.py --model LightGBM first."
+        )
+
+    forecaster = LightGBMForecaster.load(checkpoint_path)
+
+    history_start = max(0, val_end - forecaster.seq_len - 30)
+    df_eval = df.iloc[history_start:].reset_index(drop=True)
+
+    preds = forecaster.predict(df_eval)
+    trues = forecaster.get_ground_truth(df_eval)
+
+    return preds, trues, forecaster.target_features
+
+
+def _evaluate_pytorch(args):
+    """Load and evaluate a PyTorch model. Returns (preds, trues, target_names)."""
     test_cfg = TestConfig(
         model_name=args.model,
         ticker=args.ticker,
@@ -194,26 +255,14 @@ def main():
         batch_size=args.batch_size,
         checkpoint_dir=args.checkpoint_dir,
     )
-    
+
     if args.device:
         test_cfg.device = args.device
-    
+
     ma_targets = args.ma_targets or []
 
-    print("\n" + "=" * 60)
-    print("Stock Price Forecasting - Evaluation")
-    print("=" * 60)
-    print(f"Ticker: {test_cfg.ticker}")
-    print(f"Model: {test_cfg.model_name}")
-    print(f"Device: {test_cfg.device}")
-    print(f"Lookback: {test_cfg.seq_len} days | Forecast: {test_cfg.pred_len} days")
-    if ma_targets:
-        print(f"MA targets: {ma_targets}")
-    print("=" * 60 + "\n")
-    
-    # Load test dataset first so we can read enc_in / c_out from the data
     print("Loading Test Data...")
-    test_dataset = YahooDataset(
+    test_dataset = ParquetDataset(
         ticker=test_cfg.ticker,
         root_path=test_cfg.data_root,
         flag='test',
@@ -221,27 +270,24 @@ def main():
         pred_len=test_cfg.pred_len,
         ma_targets=ma_targets,
     )
-    
+
     test_loader = DataLoader(
         test_dataset,
         batch_size=test_cfg.batch_size,
         shuffle=False,
         drop_last=False,
     )
-    
+
     print(f"Test samples: {len(test_dataset)}\n")
-    
-    # Get model config (enc_in and c_out auto-detected from dataset)
+
     model_cfg = get_model_config(
         test_cfg.model_name, test_cfg.seq_len, test_cfg.pred_len,
         enc_in=test_dataset.enc_in,
         c_out=test_dataset.c_out,
     )
-    
-    # Create model
+
     model = get_model(test_cfg.model_name, model_cfg).to(test_cfg.device)
-    
-    # Load checkpoint
+
     if args.checkpoint:
         checkpoint_path = args.checkpoint
     else:
@@ -249,47 +295,55 @@ def main():
             test_cfg.checkpoint_dir,
             f"{test_cfg.ticker}_{test_cfg.model_name}_best.pt"
         )
-    
+
     if not os.path.exists(checkpoint_path):
-        print(f"Error: Checkpoint not found: {checkpoint_path}")
-        print("Run train.py first to train the model.")
-        return
-    
+        raise FileNotFoundError(
+            f"Checkpoint not found: {checkpoint_path}\n"
+            f"Run train.py first to train the model."
+        )
+
     load_checkpoint(model, checkpoint_path, test_cfg.device)
-    
-    # Evaluate
+
     print("\nEvaluating on Test Set...")
     print("-" * 60)
-    
+
     criterion = nn.MSELoss()
-    results, preds, trues = evaluate(
+    _, preds, trues = evaluate(
         model, test_loader, criterion, test_cfg.device, test_dataset
     )
-    
-    # Print results
+
+    return preds, trues, test_dataset.target_features
+
+
+def main():
+    args = parse_args()
+
     print("\n" + "=" * 60)
-    print("TEST RESULTS (Original Scale)")
+    print("Stock Price Forecasting - Evaluation")
     print("=" * 60)
-    print(f"\nOverall:")
-    print(f"  MSE:  {results['overall']['MSE']:.4f}")
-    print(f"  MAE:  {results['overall']['MAE']:.4f}")
-    print(f"  RMSE: {results['overall']['RMSE']:.4f}")
-    for target_name in test_dataset.target_features:
-        print(f"\n{target_name} Prediction:")
-        print(f"  MSE:  {results[target_name]['MSE']:.4f}")
-        print(f"  MAE:  {results[target_name]['MAE']:.4f}")
-        print(f"  RMSE: {results[target_name]['RMSE']:.4f}")
-    print("=" * 60)
-    
-    # Save predictions
+    print(f"Ticker: {args.ticker}")
+    print(f"Model: {args.model}")
+    print(f"Lookback: {args.seq_len} days | Forecast: {args.pred_len} days")
+    if args.ma_targets:
+        print(f"MA targets: {args.ma_targets}")
+    print("=" * 60 + "\n")
+
+    # Get predictions (model-specific loading)
+    if args.model == "LightGBM":
+        preds, trues, target_names = _evaluate_lightgbm(args)
+    else:
+        preds, trues, target_names = _evaluate_pytorch(args)
+
+    # Shared: compute metrics, print, save
+    results = {"overall": calculate_metrics(preds, trues)}
+    for i, name in enumerate(target_names):
+        results[name] = calculate_metrics(preds[:, :, i], trues[:, :, i])
+
+    print_results(results, target_names)
+
     if args.save_predictions:
-        output_dir = "results"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        np.save(os.path.join(output_dir, f"{test_cfg.ticker}_predictions.npy"), preds)
-        np.save(os.path.join(output_dir, f"{test_cfg.ticker}_ground_truth.npy"), trues)
-        print(f"\nPredictions saved to {output_dir}/")
-    
+        save_predictions(args.ticker, preds, trues)
+
     return results
 
 

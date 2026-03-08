@@ -4,12 +4,12 @@ Triple Barrier Method for Meta-Label generation.
 Implements the labeling framework from Marcos Lopez de Prado's
 *Advances in Financial Machine Learning* (Chapter 3).
 
-The primary model (TimeMixer) provides the direction signal and predicts the
-take-profit level (predicted High).  This module evaluates whether that
-prediction would have been *profitable* by simulating a trade with three exit
-conditions (barriers):
+The primary model (TimesNet, TimeMixer, or LightGBM) provides the direction
+signal and predicts the take-profit level (predicted High).  This module
+evaluates whether that prediction would have been *profitable* by simulating
+a trade with three exit conditions (barriers):
 
-    Upper barrier  -  Take-Profit: predicted High price from TimeMixer
+    Upper barrier  -  Take-Profit: predicted High price from primary model
     Lower barrier  -  Stop-Loss:   dynamic, set at a multiple of daily volatility
     Vertical barrier - Timeout:    max holding period in bars
 
@@ -81,8 +81,8 @@ def apply_triple_barrier(df: pd.DataFrame, pred_high_col: str = "pred_high", clo
     Barrier construction
     --------------------
     Upper barrier (Take-Profit):
-        Set to the predicted High price from the primary model (TimeMixer).
-        This directly evaluates the model's price-level forecast: "Did the
+        Set to the predicted High price from the primary model.  This
+        directly evaluates the model's price-level forecast: "Did the
         market actually reach the price the model predicted?"
         Clipped to be at least marginally above the entry price to avoid
         degenerate labels where TP == entry.
@@ -104,9 +104,9 @@ def apply_triple_barrier(df: pd.DataFrame, pred_high_col: str = "pred_high", clo
             DataFrame containing actual OHLC price columns **and** the
             primary model's predicted high price.  One row per bar.
         pred_high_col (str):
-            Column name holding TimeMixer's predicted High price.  This
-            value is used *directly* as the upper-barrier (take-profit)
-            level.
+            Column name holding the primary model's predicted High price.
+            This value is used *directly* as the upper-barrier
+            (take-profit) level.
         close_col (str):
             Column name for the execution / entry price (close of the
             signal bar).

@@ -6,7 +6,8 @@ a LightGBM binary classifier using Purged K-Fold cross-validation, and
 saves the trained model for later inference.
 
 The meta-classifier learns to predict the *probability* that a signal
-from the primary model (TimeMixer) will result in a profitable trade.
+from the primary model (TimesNet, TimeMixer, or LightGBM) will result
+in a profitable trade.
 It is trained on market-context features (ATR, RSI, MACD, volatility)
 and prediction-derived features (pred_return, pred_close_return).
 

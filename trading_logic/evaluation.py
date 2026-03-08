@@ -86,8 +86,8 @@ def evaluate_baseline(
     """
     Evaluate the primary model's signals WITHOUT any filtering.
 
-    In the baseline scenario, the primary model (TimeMixer) generates a
-    "buy" signal on every bar and all signals are acted upon.  This is
+    In the baseline scenario, the primary model generates a "buy"
+    signal on every bar and all signals are acted upon.  This is
     equivalent to setting ``y_pred = np.ones_like(y_true)`` -- the model
     predicts positive (profitable) for every observation.
 

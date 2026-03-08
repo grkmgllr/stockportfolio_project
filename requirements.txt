@@ -1,14 +1,21 @@
+# Core ML / Data
 numpy
 pandas
-yfinance
 scikit-learn
-matplotlib
-tqdm
-jupyter
-seaborn
-beartype
-torchtyping
-pyarrow
 lightgbm
 scipy
 joblib
+
+# Deep Learning (install PyTorch separately for CUDA support)
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+beartype
+torchtyping
+
+# Data I/O
+pyarrow
+yfinance
+
+# Visualization
+matplotlib
+seaborn
+jupyter

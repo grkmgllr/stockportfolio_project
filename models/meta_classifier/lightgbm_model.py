@@ -4,8 +4,8 @@ LightGBM Meta-Classifier for filtering primary model signals.
 This module wraps a LightGBM binary classifier behind a clean interface
 that integrates with the rest of the meta-labeling pipeline.  The model
 is trained to predict the *probability* that a signal from the primary
-model (TimeMixer) will result in a profitable trade (as defined by the
-Triple Barrier Method).
+model (TimesNet, TimeMixer, or LightGBM forecaster) will result in a
+profitable trade (as defined by the Triple Barrier Method).
 
 Design goals
 ------------

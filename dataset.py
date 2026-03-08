@@ -41,8 +41,8 @@ class ParquetDataset(Dataset):
         ticker: str,
         root_path: str = 'data/raw',
         flag: Literal['train', 'val', 'test'] = 'train',
-        seq_len: int = 30,
-        pred_len: int = 1,
+        seq_len: int = 14,
+        pred_len: int = 5,
         input_features: Optional[List[str]] = None,
         target_features: Optional[List[str]] = None,
         scale: bool = True,
@@ -255,7 +255,7 @@ class ParquetDataset(Dataset):
         return self.scaler_x.inverse_transform(data)
     
     def inverse_transform_y(self, data: np.ndarray) -> np.ndarray:
-        """Inverse transform target features (High, Close) back to original scale."""
+        """Inverse transform target features back to original scale."""
         return self.scaler_y.inverse_transform(data)
     
     @property

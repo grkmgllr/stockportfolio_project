@@ -1,12 +1,12 @@
 """
 Training script for stock price forecasting.
 Predicts High/Close (+ optional EMA_20/SMA_50) from OHLCV data using
-TimeMixer or TimesNet.
+TimeMixer, TimesNet, or LightGBM.
 
 Usage:
     python train.py --ticker AAPL
     python train.py --ticker AAPL --model TimeMixer --epochs 100
-    python train.py --ticker AAPL --ma_targets EMA_20 SMA_50
+    python train.py --ticker AAPL --model LightGBM --ma_targets EMA_20 SMA_50
 """
 import torch
 import torch.nn as nn
@@ -18,7 +18,9 @@ import argparse
 from dataclasses import dataclass, field
 from typing import List, Literal
 
-from dataset import YahooDataset
+import pandas as pd
+
+from dataset import ParquetDataset
 from utils import EarlyStopping, get_scheduler, calculate_metrics
 
 # Import models
@@ -26,6 +28,7 @@ from models import (
     TimeMixer, TimeMixerConfig,
     TimesNetModel, TimesNetConfig,
 )
+from models.LightGBMForecaster import LightGBMForecaster
 
 
 @dataclass
@@ -37,7 +40,7 @@ class TrainingConfig:
     to predict High/Close prices from OHLCV input data.
     
     Attributes:
-        model_name: Model architecture ('TimeMixer' or 'TimesNet')
+        model_name: Model architecture ('TimesNet', 'TimeMixer', or 'LightGBM')
         ticker: Stock ticker symbol (e.g., 'AAPL', 'MSFT')
         data_root: Directory containing {ticker}.csv files
         seq_len: Number of historical days to use as input (lookback window)
@@ -53,13 +56,13 @@ class TrainingConfig:
         checkpoint_dir: Directory to save model checkpoints
     """
     # Model selection
-    model_name: Literal["TimeMixer", "TimesNet"] = "TimesNet"
+    model_name: Literal["TimeMixer", "TimesNet", "LightGBM"] = "TimesNet"
     
     # Data configuration
     ticker: str = "AAPL"
     data_root: str = "data/raw"
-    seq_len: int = 30       # 30 days lookback
-    pred_len: int = 1       # forecast horizon
+    seq_len: int = 14       # 14 days lookback
+    pred_len: int = 5       # forecast horizon
     
     # Training hyperparameters
     batch_size: int = 32
@@ -220,7 +223,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="TimesNet",
-        choices=["TimeMixer", "TimesNet"],
+        choices=["TimeMixer", "TimesNet", "LightGBM"],
         help="Model to train (default: TimesNet)",
     )
     
@@ -251,10 +254,91 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _load_raw_df(ticker: str, data_root: str, ma_targets: List[str],
+                  train_ratio: float = 0.7, val_ratio: float = 0.15):
+    """Load CSV, compute MA columns, trim warm-up, and split."""
+    csv_path = os.path.join(data_root, f"{ticker}.csv")
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(
+            f"Data file not found: {csv_path}\n"
+            f"Run resample_parquet.py or fetch_data.py first."
+        )
+
+    from dataset import ParquetDataset
+
+    df = pd.read_csv(csv_path).ffill().bfill()
+
+    for ma_name in ma_targets:
+        cfg = ParquetDataset.MA_CONFIGS[ma_name]
+        df[ma_name] = ParquetDataset._compute_ma(
+            df["Close"], cfg["method"], cfg["period"],
+        )
+
+    if ma_targets:
+        max_period = max(
+            ParquetDataset.MA_CONFIGS[n]["period"] for n in ma_targets
+        )
+        df = df.iloc[max_period - 1 :].reset_index(drop=True)
+
+    total = len(df)
+    train_end = int(total * train_ratio)
+    val_end = int(total * (train_ratio + val_ratio))
+
+    target_features = ["High", "Close"] + [
+        n for n in ma_targets if n not in ("High", "Close")
+    ]
+
+    return df, train_end, val_end, target_features
+
+
+def train_lightgbm(args):
+    """Train a LightGBM forecaster (no PyTorch needed)."""
+    ma_targets = args.ma_targets or []
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+
+    df, train_end, val_end, target_features = _load_raw_df(
+        args.ticker, args.data_root, ma_targets,
+    )
+
+    df_train = df.iloc[:train_end].copy()
+    df_val = df.iloc[train_end:val_end].copy()
+
+    forecaster = LightGBMForecaster(
+        seq_len=args.seq_len,
+        pred_len=args.pred_len,
+    )
+
+    forecaster.fit(
+        df_train, df_val,
+        target_features=target_features,
+        early_stopping_rounds=args.patience * 5,
+    )
+
+    # Feature importance summary
+    print("\nTop-10 Feature Importance (gain):")
+    print("-" * 40)
+    for i, (name, score) in enumerate(forecaster.feature_importance().items()):
+        if i >= 10:
+            break
+        print(f"  {name:25s}: {score:.1f}")
+
+    checkpoint_path = os.path.join(
+        args.checkpoint_dir,
+        f"{args.ticker}_LightGBM_best.joblib",
+    )
+    forecaster.save(checkpoint_path)
+    print(f"\nCheckpoint: {checkpoint_path}")
+
+
 def main():
     args = parse_args()
-    
-    # Create training config
+
+    # ── LightGBM branch (no PyTorch) ──
+    if args.model == "LightGBM":
+        train_lightgbm(args)
+        return
+
+    # ── PyTorch branch (TimesNet / TimeMixer) ──
     train_cfg = TrainingConfig(
         model_name=args.model,
         ticker=args.ticker,
@@ -274,14 +358,12 @@ def main():
     if args.device:
         train_cfg.device = args.device
     
-    # Create checkpoint directory
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
     
     ma_targets = args.ma_targets or []
 
-    # Load datasets first so we can read enc_in / c_out from the data
     print("Loading Data...")
-    train_dataset = YahooDataset(
+    train_dataset = ParquetDataset(
         ticker=train_cfg.ticker,
         root_path=train_cfg.data_root,
         flag='train',
@@ -289,7 +371,7 @@ def main():
         pred_len=train_cfg.pred_len,
         ma_targets=ma_targets,
     )
-    val_dataset = YahooDataset(
+    val_dataset = ParquetDataset(
         ticker=train_cfg.ticker,
         root_path=train_cfg.data_root,
         flag='val',
@@ -298,14 +380,12 @@ def main():
         ma_targets=ma_targets,
     )
     
-    # Get model config (enc_in and c_out auto-detected from dataset)
     model_cfg = get_model_config(
         train_cfg.model_name, train_cfg.seq_len, train_cfg.pred_len,
         enc_in=train_dataset.enc_in,
         c_out=train_dataset.c_out,
     )
     
-    # Print configuration
     print_config(train_cfg, model_cfg, train_dataset.target_features)
     
     train_loader = DataLoader(
@@ -324,11 +404,9 @@ def main():
     print(f"\nTrain samples: {len(train_dataset)}")
     print(f"Val samples: {len(val_dataset)}")
     
-    # Create model
     model = get_model(train_cfg.model_name, model_cfg).to(train_cfg.device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Loss, optimizer, scheduler
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -343,7 +421,6 @@ def main():
         gamma=train_cfg.scheduler_gamma,
     )
     
-    # Early stopping
     checkpoint_path = os.path.join(
         train_cfg.checkpoint_dir,
         f"{train_cfg.ticker}_{train_cfg.model_name}_best.pt"
@@ -354,7 +431,6 @@ def main():
         verbose=True,
     )
     
-    # Training loop
     print("\nStarting Training...")
     print("-" * 60)
     
@@ -367,7 +443,6 @@ def main():
         )
         val_loss = validate_epoch(model, val_loader, criterion, train_cfg.device)
         
-        # Scheduler step
         if scheduler is not None:
             scheduler.step()
             current_lr = scheduler.get_last_lr()[0]
@@ -379,7 +454,6 @@ def main():
               f"Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
               f"LR: {current_lr:.2e} | Time: {elapsed:.1f}s")
         
-        # Early stopping
         if early_stopping(val_loss, model, epoch + 1):
             print(f"\nEarly stopping at epoch {epoch + 1}")
             break
