@@ -45,4 +45,4 @@ tensorboard/
 
 # OS-specific
 .DS_Store
-Thumbs.db
+Thumbs.dbforecast_plots/
