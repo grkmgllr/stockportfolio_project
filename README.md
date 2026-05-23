@@ -1,13 +1,13 @@
 # Stock Price Forecasting & Meta-Labeling Trading Pipeline
 
-![Python](https://img.shields.io/badge/Python-3.13-blue)
-![PyTorch](https://img.shields.io/badge/PyTorch-cu128-orange)
-![LightGBM](https://img.shields.io/badge/LightGBM-4.x-brightgreen)
+![Python](https://img.shields.io/badge/Python-3.12-blue)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.6-orange)
+![LightGBM](https://img.shields.io/badge/LightGBM-4.6-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 **ENS 491/492 - Graduation Project** | **Sabanci University**
 
-A two-stage algorithmic trading pipeline that combines **neural time-series forecasting** with **meta-labeling** (Lopez de Prado) to filter trade signals and improve precision.
+A two-stage algorithmic trading pipeline that combines **neural time-series forecasting** with **meta-labeling** (Lopez de Prado) to filter trade signals and improve precision. Trained on a **pooled dataset of 5 major tech stocks** (AAPL, MSFT, GOOGL, NVDA, META) using return-based prediction.
 
 ## Project Team
 
@@ -28,12 +28,13 @@ Raw Minute Bars (Parquet)
   resample_parquet.py          Data Cleaning (RTH filter, drop weekends/holidays)
         |
         v
-  AAPL.csv (939 daily bars)
+  5 Ticker CSVs                AAPL, MSFT, GOOGL, NVDA, META (2022+)
+  (849-941 daily bars each)
         |
    +---------+---------+
    |         |         |
 TimesNet  TimeMixer  LightGBM   Stage 1: Price Forecasting
-   |         |         |
+   |         |         |         (return-based targets, pooled training)
    +---------+---------+
         |
         v
@@ -51,13 +52,17 @@ TimesNet  TimeMixer  LightGBM   Stage 1: Price Forecasting
 
 ## Key Results
 
-### Stage 1 — Price Forecasting (AAPL, 5-day horizon)
+### Stage 1 — Pooled TimeMixer (5-day horizon, return-based prediction)
 
-| Model | MAE ($) | RMSE ($) | Parameters |
-|-------|---------|----------|------------|
-| **LightGBM** | **5.62** | **8.19** | 10 sub-models |
-| TimesNet | 6.94 | 9.56 | 2.3M |
-| TimeMixer | 7.96 | 11.00 | 69K |
+| Ticker | MAE ($) | IC | RIC | DA |
+|--------|---------|-------|-------|-------|
+| AAPL | 4.73 | 0.163 | 0.173 | 64.2% |
+| GOOGL | 4.50 | **0.189** | **0.205** | 70.9% |
+| NVDA | **3.87** | 0.091 | 0.121 | 70.9% |
+| MSFT | 6.85 | 0.106 | 0.181 | **72.7%** |
+| META | 14.41 | 0.145 | 0.183 | 63.3% |
+
+> IC = Information Coefficient (Pearson), RIC = Rank IC (Spearman), DA = Directional Accuracy
 
 ### Stage 2 — Meta-Labeling (Signal Filtering)
 
@@ -73,12 +78,12 @@ TimesNet  TimeMixer  LightGBM   Stage 1: Price Forecasting
 ```
 stockportfolio_project/
 ├── data/
-│   ├── raw/                      # Raw parquet + resampled daily CSV
+│   ├── raw/                      # Raw parquet + resampled daily CSVs (5 tickers)
 │   └── meta/                     # Meta-labels and predictions
 ├── models/
 │   ├── TimesNet/                 # CNN-based temporal 2D variation
 │   ├── TimeMixer/                # MLP-based multi-scale mixing
-│   ├── LightGBMForecaster/       # GBDT with delta-based prediction
+│   ├── LightGBMForecaster/       # GBDT with return-based prediction
 │   └── meta_classifier/          # LightGBM binary classifier
 ├── trading_logic/
 │   ├── triple_barrier.py         # Triple Barrier Method (labeling)
@@ -89,11 +94,12 @@ stockportfolio_project/
 │   └── generate_meta_labels.py   # Feature engineering bridge
 ├── docs/
 │   └── RESULTS_REPORT.md         # Full results report
-├── dataset.py                    # ParquetDataset (PyTorch Dataset)
-├── train.py                      # Training script (all 3 models)
-├── test.py                       # Evaluation script (all 3 models)
+├── main.py                       # Unified entry point (train/test/meta/run-all)
+├── dataset.py                    # ParquetDataset (PyTorch Dataset, multi-ticker)
+├── train.py                      # Training script (single/pooled multi-ticker)
+├── test.py                       # Evaluation script (per-ticker metrics)
 ├── train_meta.py                 # Meta-classifier training
-└── utils.py                      # Metrics, early stopping, schedulers
+└── utils.py                      # Metrics (MSE/MAE/IC/RIC/DA), early stopping
 ```
 
 ## Quick Start
@@ -104,40 +110,54 @@ stockportfolio_project/
 git clone https://github.com/grkmgllr/stockportfolio_project.git
 cd stockportfolio_project
 python -m venv venv
-venv\Scripts\activate          # Windows
+source venv/bin/activate       # Linux/Mac
 pip install -r requirements.txt
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 ```
 
 ### 2. Data Preparation
 
-Place your minute-bar parquet file in `data/raw/`, then resample:
+Place your minute-bar parquet files in `data/raw/`, then resample:
 
 ```bash
 python scripts/resample_parquet.py --ticker AAPL --start_date 2022-01-01
+python scripts/resample_parquet.py --all   # All 5 tickers
 ```
 
 ### 3. Train & Test Models
 
+**Pooled multi-ticker training (recommended):**
+
 ```bash
-# TimesNet (GPU)
-python train.py --model TimesNet --ticker AAPL --seq_len 14 --pred_len 5 --epochs 100
-python test.py  --model TimesNet --ticker AAPL --seq_len 14 --pred_len 5 --save_predictions
+# Train on all 5 tickers simultaneously
+python train.py --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META \
+                --seq_len 30 --pred_len 5 --epochs 200 --lr 0.0002
 
-# TimeMixer (GPU)
-python train.py --model TimeMixer --ticker AAPL --seq_len 14 --pred_len 5 --epochs 100
-python test.py  --model TimeMixer --ticker AAPL --seq_len 14 --pred_len 5 --save_predictions
+# Evaluate per-ticker
+python test.py --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META \
+               --seq_len 30 --pred_len 5
+```
 
-# LightGBM (CPU)
-python train.py --model LightGBM --ticker AAPL --seq_len 14 --pred_len 5
-python test.py  --model LightGBM --ticker AAPL --seq_len 14 --pred_len 5 --save_predictions
+**Single-ticker training:**
+
+```bash
+python train.py --model TimeMixer --ticker AAPL --seq_len 30 --pred_len 5 --epochs 100
+python test.py  --model TimeMixer --ticker AAPL --seq_len 30 --pred_len 5
+```
+
+**Via unified entry point (main.py):**
+
+```bash
+python main.py train --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META --epochs 200
+python main.py test  --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META
+python main.py run-all --model TimeMixer --ticker AAPL  # Full pipeline (train+test+meta)
 ```
 
 ### 4. Meta-Labeling Pipeline
 
 ```bash
 # Generate meta-labels from primary model predictions
-python scripts/generate_meta_labels.py --ticker AAPL --seq_len 14 --pred_len 5
+python scripts/generate_meta_labels.py --ticker AAPL --seq_len 30 --pred_len 5
 
 # Train meta-classifier
 python train_meta.py --ticker AAPL
@@ -145,22 +165,39 @@ python train_meta.py --ticker AAPL
 
 ## Models
 
-### TimesNet
-Transforms 1D time series into 2D tensors to capture intra-period and inter-period variations using CNNs. Based on [Wu et al., 2023](https://arxiv.org/abs/2210.02186).
-
 ### TimeMixer
-Uses MLP-based multi-scale mixing with Past-Decomposable-Mixing blocks for efficient time series forecasting.
+Uses MLP-based multi-scale mixing with Past-Decomposable-Mixing blocks. Best performing model with **69K parameters** — achieves IC up to 0.189 and DA up to 72.7% across 5 tickers.
+
+### TimesNet
+Transforms 1D time series into 2D tensors to capture intra-period and inter-period variations using CNNs. Based on [Wu et al., 2023](https://arxiv.org/abs/2210.02186). **2.3M parameters**.
 
 ### LightGBM Forecaster
-Gradient boosted decision trees with hand-crafted features (returns, RSI, MACD, ATR, Bollinger width). Uses **delta-based prediction** — predicts price changes from the last Close, then converts back to absolute prices.
+Gradient boosted decision trees with 31 hand-crafted features (returns, RSI, MACD, ATR, Bollinger width). Uses **return-based prediction** — predicts percentage returns from the anchor Close price.
 
 ### Meta-Classifier
 A secondary LightGBM classifier trained on market-context features to filter the primary model's trade signals. Uses **Purged K-Fold** cross-validation to prevent data leakage.
+
+## Key Technical Decisions
+
+- **Return-based targets**: All models predict percentage returns instead of absolute prices. This improved TimeMixer MAE by 39.8% and enables cross-ticker generalization.
+- **Pooled multi-ticker training**: A single model is trained on all 5 tickers simultaneously via `ConcatDataset`. Return-based targets make this possible since all stocks are in the same scale.
+- **Post-COVID data only**: All data is filtered to 2022-01-01+ to avoid pandemic-era anomalies.
+- **Per-ticker evaluation**: Despite pooled training, test metrics are computed per-ticker to measure generalization.
+
+## Evaluation Metrics
+
+| Metric | Description |
+|--------|-------------|
+| MAE / RMSE | Price error in dollars (after converting returns back to prices) |
+| IC | Information Coefficient — Pearson correlation between predicted and actual returns |
+| RIC | Rank IC — Spearman rank correlation (ordinal agreement) |
+| DA | Directional Accuracy — fraction of correct return sign predictions |
 
 ## References
 
 - Lopez de Prado, M. (2018). *Advances in Financial Machine Learning*. Wiley.
 - Wu, H., et al. (2023). "TimesNet: Temporal 2D-Variation Modeling for General Time Series Analysis." ICLR 2023.
+- Fan, J. & Shen, Y. (2024). Information Coefficient metrics for financial forecasting.
 - Ke, G., et al. (2017). "LightGBM: A Highly Efficient Gradient Boosting Decision Tree." NeurIPS 2017.
 
 ## License
