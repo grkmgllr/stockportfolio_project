@@ -47,3 +47,6 @@ tensorboard/
 # OS-specific
 .DS_Store
 Thumbs.dbforecast_plots/
+
+forecast_plots/
+hybrid_diagnostics_*/
