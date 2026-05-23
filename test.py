@@ -62,7 +62,9 @@ class TestConfig:
 
 
 def get_model_config(model_name: str, seq_len: int, pred_len: int,
-                     enc_in: int = 5, c_out: int = 2):
+                     enc_in: int = 5, c_out: int = 2,
+                     denorm_indices: tuple | None = None,
+                     return_targets: bool = False):
     """Get model config for stock price prediction."""
     if model_name == "TimesNet":
         return TimesNetConfig(
@@ -77,12 +79,19 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int,
             top_k=3,
             num_kernels=6,
             embed="fixed",
-            freq="h",
+            freq="d",
             dropout=0.1,
             num_class=c_out,
+            denorm_indices=denorm_indices,
+            return_targets=return_targets,
         )
     elif model_name == "TimeMixer":
         n_layers = 1 if seq_len % 4 != 0 else 2
+        min_scale = seq_len // (2 ** n_layers)
+        ma_kernel = min(25, min_scale - 2)
+        if ma_kernel % 2 == 0:
+            ma_kernel -= 1
+        ma_kernel = max(3, ma_kernel)
         return TimeMixerConfig(
             historical_lookback_length=seq_len,
             forecast_horizon_length=pred_len,
@@ -94,6 +103,9 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int,
             dropout_probability=0.1,
             downsampling_window_size=2,
             number_of_downsampling_layers=n_layers,
+            moving_average_kernel_size=ma_kernel,
+            denorm_indices=denorm_indices,
+            return_targets=return_targets,
         )
     else:
         raise ValueError(f"Unknown model: {model_name}")
@@ -112,52 +124,60 @@ def get_model(model_name: str, config):
 def evaluate(model, test_loader, criterion, device, dataset):
     """
     Evaluate model on test set.
-    
-    Returns predictions and ground truth in original scale, with
+
+    Returns predictions and ground truth in original price scale, with
     per-target metrics keyed by the target feature name.
+
+    When the dataset uses return_targets, model outputs are percentage
+    returns which are converted back to absolute prices via the anchor
+    Close price before computing metrics.
     """
     model.eval()
-    
+
     all_preds = []
     all_trues = []
     test_loss = []
-    
+
     with torch.no_grad():
         for batch_x, batch_y in test_loader:
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
-            
+
             outputs = model(batch_x, None)
-            
+
             loss = criterion(outputs, batch_y)
             test_loss.append(loss.item())
-            
+
             all_preds.append(outputs.cpu().numpy())
             all_trues.append(batch_y.cpu().numpy())
-    
+
     # Concatenate all batches: [N, pred_len, n_targets]
     all_preds = np.concatenate(all_preds, axis=0)
     all_trues = np.concatenate(all_trues, axis=0)
-    
+
     n_samples, pred_len, n_features = all_preds.shape
-    
-    preds_flat = all_preds.reshape(-1, n_features)
-    trues_flat = all_trues.reshape(-1, n_features)
-    
-    preds_original = dataset.inverse_transform_y(preds_flat).reshape(n_samples, pred_len, n_features)
-    trues_original = dataset.inverse_transform_y(trues_flat).reshape(n_samples, pred_len, n_features)
-    
+
+    if dataset.return_targets:
+        anchors = dataset.get_anchors()  # [N]
+        a = anchors[:, None, None]       # [N, 1, 1] for broadcasting
+        preds_original = a * (1.0 + all_preds)
+        trues_original = a * (1.0 + all_trues)
+    else:
+        preds_flat = all_preds.reshape(-1, n_features)
+        trues_flat = all_trues.reshape(-1, n_features)
+        preds_original = dataset.inverse_transform_y(preds_flat).reshape(n_samples, pred_len, n_features)
+        trues_original = dataset.inverse_transform_y(trues_flat).reshape(n_samples, pred_len, n_features)
+
     results = {
         'overall': calculate_metrics(preds_original, trues_original),
         'test_loss': np.average(test_loss),
     }
 
-    # Per-target metrics keyed by feature name
     for i, name in enumerate(dataset.target_features):
         results[name] = calculate_metrics(
             preds_original[:, :, i], trues_original[:, :, i],
         )
-    
+
     return results, preds_original, trues_original
 
 
@@ -269,6 +289,7 @@ def _evaluate_pytorch(args):
         seq_len=test_cfg.seq_len,
         pred_len=test_cfg.pred_len,
         ma_targets=ma_targets,
+        return_targets=True,
     )
 
     test_loader = DataLoader(
@@ -284,6 +305,8 @@ def _evaluate_pytorch(args):
         test_cfg.model_name, test_cfg.seq_len, test_cfg.pred_len,
         enc_in=test_dataset.enc_in,
         c_out=test_dataset.c_out,
+        denorm_indices=test_dataset.denorm_indices,
+        return_targets=True,
     )
 
     model = get_model(test_cfg.model_name, model_cfg).to(test_cfg.device)

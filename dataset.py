@@ -49,6 +49,7 @@ class ParquetDataset(Dataset):
         train_ratio: float = 0.7,
         val_ratio: float = 0.15,
         ma_targets: Optional[List[str]] = None,
+        return_targets: bool = False,
     ):
         """
         Args:
@@ -71,6 +72,7 @@ class ParquetDataset(Dataset):
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.scale = scale
+        self.return_targets = return_targets
         
         # Default features (resolved in _load_data after reading the CSV)
         self._input_features_override = input_features
@@ -200,21 +202,26 @@ class ParquetDataset(Dataset):
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
         
+        # Raw close prices (unscaled) for return-based targets
+        close_col_idx = self.input_features.index('Close')
+        self.raw_close = df_input.iloc[border1:border2, close_col_idx].values.astype(np.float64)
+
         if self.scale:
             # Fit scalers ONLY on training data
             train_x = df_input.iloc[border1s[0]:border2s[0]].values
-            train_y = df_target.iloc[border1s[0]:border2s[0]].values
-            
             self.scaler_x.fit(train_x)
-            self.scaler_y.fit(train_y)
-            
-            # Transform all data
             data_x = self.scaler_x.transform(df_input.values)
-            data_y = self.scaler_y.transform(df_target.values)
+
+            if not self.return_targets:
+                train_y = df_target.iloc[border1s[0]:border2s[0]].values
+                self.scaler_y.fit(train_y)
+                data_y = self.scaler_y.transform(df_target.values)
+            else:
+                data_y = df_target.values.astype(np.float64)
         else:
             data_x = df_input.values
             data_y = df_target.values
-        
+
         # Slice to current split
         self.data_x = data_x[border1:border2]
         self.data_y = data_y[border1:border2]
@@ -229,19 +236,25 @@ class ParquetDataset(Dataset):
     def __getitem__(self, index):
         """
         Get a single sample.
-        
+
         Returns:
             seq_x: Input sequence [seq_len, n_input_features]
             seq_y: Target sequence [pred_len, n_target_features]
+                   When return_targets=True, targets are percentage returns
+                   relative to the anchor Close price.
         """
         s_begin = index
         s_end = s_begin + self.seq_len
         r_begin = s_end
         r_end = r_begin + self.pred_len
-        
+
         seq_x = self.data_x[s_begin:s_end]
         seq_y = self.data_y[r_begin:r_end]
-        
+
+        if self.return_targets:
+            anchor = self.raw_close[s_end - 1]
+            seq_y = (seq_y - anchor) / anchor
+
         return (
             torch.tensor(seq_x, dtype=torch.float32),
             torch.tensor(seq_y, dtype=torch.float32),
@@ -250,23 +263,55 @@ class ParquetDataset(Dataset):
     def __len__(self):
         return len(self.data_x) - self.seq_len - self.pred_len + 1
     
+    def get_anchors(self) -> np.ndarray:
+        """Return anchor Close prices for all samples (one per sample)."""
+        n = len(self)
+        return np.array([self.raw_close[i + self.seq_len - 1] for i in range(n)])
+
     def inverse_transform_x(self, data: np.ndarray) -> np.ndarray:
         """Inverse transform input features back to original scale."""
         return self.scaler_x.inverse_transform(data)
-    
-    def inverse_transform_y(self, data: np.ndarray) -> np.ndarray:
-        """Inverse transform target features back to original scale."""
+
+    def inverse_transform_y(self, data: np.ndarray, anchors: np.ndarray | None = None) -> np.ndarray:
+        """Inverse transform target features back to original scale.
+
+        When return_targets=True, ``data`` contains percentage returns and
+        ``anchors`` must be provided to convert back to absolute prices.
+        """
+        if self.return_targets:
+            if anchors is None:
+                raise ValueError("anchors required when return_targets=True")
+            return anchors * (1.0 + data)
         return self.scaler_y.inverse_transform(data)
     
     @property
     def enc_in(self) -> int:
         """Number of input features (for model config)."""
         return self.n_input_features
-    
+
     @property
     def c_out(self) -> int:
         """Number of output features (for model config)."""
         return self.n_target_features
+
+    @property
+    def denorm_indices(self) -> tuple:
+        """
+        Map each target channel to its closest input channel index.
+
+        Used by TimesNet / TimeMixer to pick the right per-sample
+        mean/std when denormalising predictions back to price scale.
+        - Price targets (High, Close) → their exact input column index.
+        - MA targets (EMA_20, SMA_50) → Close column index (same scale).
+        """
+        close_idx = self.input_features.index('Close')
+        indices = []
+        for tf in self.target_features:
+            if tf in self.input_features:
+                indices.append(self.input_features.index(tf))
+            else:
+                indices.append(close_idx)
+        return tuple(indices)
 
 
 # Backward-compatible alias

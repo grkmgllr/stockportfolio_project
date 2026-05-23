@@ -126,6 +126,17 @@ class TimesNetConfig:
 
     num_class: int = 2
 
+    # Per-target denormalization channel mapping.
+    # Each element is the index into the enc_in input channels whose
+    # per-sample mean/std should be used to denormalise that output channel.
+    # e.g. for targets [High, Close] with OHLCV input: (1, 3)
+    # If None, falls back to the first c_out input channels (old behaviour).
+    denorm_indices: tuple | None = None
+
+    # When True the model outputs percentage returns and skips
+    # NS-Norm denormalization on the output side.
+    return_targets: bool = False
+
 
 
 class TimesNetModel(ForecastModel):
@@ -292,9 +303,14 @@ class TimesNetModel(ForecastModel):
             torch.Tensor:
                 Denormalized tensor of shape [B, T, c_out].
         """
-        c_out = y.shape[-1]
-        s = stdev[:, 0, :c_out].unsqueeze(1)
-        m = means[:, 0, :c_out].unsqueeze(1)
+        if self.cfg.denorm_indices is not None:
+            idx = list(self.cfg.denorm_indices)
+            s = stdev[:, 0, idx].unsqueeze(1)
+            m = means[:, 0, idx].unsqueeze(1)
+        else:
+            c_out = y.shape[-1]
+            s = stdev[:, 0, :c_out].unsqueeze(1)
+            m = means[:, 0, :c_out].unsqueeze(1)
         return y * s + m
 
     # ---- tasks ----
@@ -340,6 +356,8 @@ class TimesNetModel(ForecastModel):
         for blk in self.blocks:
             enc = self.norm(blk(enc, self.total_len))
         y = self.proj(enc)  # [b,t_total,c]
+        if self.cfg.return_targets:
+            return y
         return self._denorm_ns_transformer(y, means, stdev)
 
     def anomaly_detection(self, x_enc: torch.Tensor) -> torch.Tensor:

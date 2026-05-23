@@ -7,11 +7,12 @@ optional moving averages (EMA_20, SMA_50).
 
 Architecture
 ------------
-- **Delta-based prediction**: Instead of predicting absolute prices
+- **Return-based prediction**: Instead of predicting absolute prices
   (which is impossible from scale-invariant features), the model
-  predicts the *change* from the last known Close price.  At inference
-  the predicted delta is added back to the anchor Close to recover
-  the absolute price.
+  predicts the *percentage return* from the last known Close price:
+  ``(future - anchor) / anchor``.  At inference the predicted return
+  is applied to the anchor Close to recover the absolute price:
+  ``anchor * (1 + predicted_return)``.
 - **Direct multi-step strategy**: For each (forecast step, target) pair,
   a separate LightGBM regressor is trained.  With ``pred_len=5`` and 4
   targets this produces 20 small models, each training in milliseconds.
@@ -70,15 +71,15 @@ class LightGBMForecaster:
         "objective": "regression",
         "metric": "mae",
         "boosting_type": "gbdt",
-        "n_estimators": 1000,
-        "learning_rate": 0.05,
-        "num_leaves": 31,
-        "max_depth": -1,
-        "min_child_samples": 10,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "reg_alpha": 0.1,
-        "reg_lambda": 0.1,
+        "n_estimators": 2000,
+        "learning_rate": 0.01,
+        "num_leaves": 15,
+        "max_depth": 5,
+        "min_child_samples": 20,
+        "subsample": 0.7,
+        "colsample_bytree": 0.7,
+        "reg_alpha": 1.0,
+        "reg_lambda": 1.0,
         "random_state": 42,
         "verbose": -1,
         "n_jobs": -1,
@@ -213,6 +214,9 @@ class LightGBMForecaster:
         """
         Train the forecaster on raw OHLCV DataFrames.
 
+        Targets are percentage returns: (future_price - anchor) / anchor.
+        This makes targets scale-invariant, matching the features.
+
         Args:
             df_train: Training split (raw OHLCV + optional MA columns).
             df_val: Validation split (immediately follows training data).
@@ -266,12 +270,13 @@ class LightGBMForecaster:
             print(f"Val samples:   {len(X_val)}")
         print(f"Targets: {target_features}")
         print(f"Pred steps: {self.pred_len}  |  Models to train: {n_models}")
+        print(f"Target type: percentage return (scale-invariant)")
         print(f"{'='*60}\n")
 
         self.models = {}
 
         # Anchor price: the Close at each sample position.
-        # Targets become deltas: target_price - anchor.
+        # Targets are percentage returns: (target_price - anchor) / anchor.
         anchor_col = df_full["Close"].values
 
         for step in range(1, self.pred_len + 1):
@@ -280,7 +285,7 @@ class LightGBMForecaster:
 
                 anchor_train = anchor_col[train_start:train_end]
                 y_train = (target_col[train_start + step : train_end + step]
-                           - anchor_train)
+                           - anchor_train) / anchor_train
 
                 model = lgb.LGBMRegressor(**self._params)
 
@@ -288,7 +293,7 @@ class LightGBMForecaster:
                 if X_val is not None and val_end > val_start:
                     anchor_val = anchor_col[val_start:val_end]
                     y_val = (target_col[val_start + step : val_end + step]
-                             - anchor_val)
+                             - anchor_val) / anchor_val
                     fit_kwargs["eval_set"] = [(X_val, y_val)]
                     fit_kwargs["callbacks"] = [
                         lgb.early_stopping(early_stopping_rounds, verbose=False),
@@ -304,8 +309,8 @@ class LightGBMForecaster:
                 val_score = ""
                 if X_val is not None:
                     anchor_val = anchor_col[val_start:val_end]
-                    delta_pred = model.predict(X_val)
-                    abs_pred = delta_pred + anchor_val
+                    pct_pred = model.predict(X_val)
+                    abs_pred = anchor_val * (1.0 + pct_pred)
                     abs_true = target_col[val_start + step : val_end + step]
                     mae = np.mean(np.abs(abs_pred - abs_true))
                     val_score = f"  val_MAE=${mae:.2f}"
@@ -324,8 +329,8 @@ class LightGBMForecaster:
         """
         Predict future values from raw OHLCV data.
 
-        Internally the model predicts deltas from the anchor Close
-        price, then converts back to absolute prices.
+        Internally the model predicts percentage returns from the anchor
+        Close price, then converts back to absolute prices.
 
         Args:
             df: DataFrame with OHLCV (+ optional extended) columns.
@@ -360,8 +365,8 @@ class LightGBMForecaster:
         for step in range(1, self.pred_len + 1):
             for t_idx, target_name in enumerate(self.target_features):
                 model = self.models[(step, target_name)]
-                delta = model.predict(X_pred)
-                preds[:, step - 1, t_idx] = anchor + delta
+                pct_return = model.predict(X_pred)
+                preds[:, step - 1, t_idx] = anchor * (1.0 + pct_return)
 
         return preds
 

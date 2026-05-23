@@ -18,6 +18,7 @@ venv/
 .vscode/
 .idea/
 .cursor/
+.claude/
 
 # DATASETS - Ignore the raw and processed data
 data/

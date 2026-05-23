@@ -45,6 +45,16 @@ class TimeMixerConfig:
 
     use_output_residual_connection: bool = True
 
+    # Per-target denormalization channel mapping (same semantics as TimesNetConfig).
+    # Each element is the index into the enc_in input channels whose per-sample
+    # mean/std is used for RevIN denormalisation of that output channel.
+    # If None, falls back to the first c_out input channels.
+    denorm_indices: Optional[tuple] = None
+
+    # When True the model outputs percentage returns and skips
+    # RevIN denormalization on the output side.
+    return_targets: bool = False
+
     # Compatibility properties for unified interface with TimesNetForecastConfig
     @property
     def seq_len(self) -> int:
@@ -149,6 +159,9 @@ class TimeMixer(nn.Module):
         self.dropout = nn.Dropout(config.dropout_probability)
         self.activation = makeActivation(config.activation_function_name)
 
+        # RevIN denormalisation index mapping (None → use first c_out channels)
+        self.denorm_indices = list(config.denorm_indices) if config.denorm_indices is not None else None
+
 
     def multiscale_inputs(self, x: torch.Tensor) -> List[torch.Tensor]:
         """
@@ -214,25 +227,42 @@ class TimeMixer(nn.Module):
 
     def forward(self, x: torch.Tensor, x_mark: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Forward pass for TimeMixer.
-        
+        Forward pass for TimeMixer with RevIN normalization.
+
+        RevIN removes each window's per-channel mean/std before the model
+        sees the data, then adds them back to the predictions. This is the
+        same mechanism TimesNet uses (NS-Norm) and is the primary fix for
+        TimeMixer's inability to generalise across price levels.
+
         Args:
             x: Input tensor [B, L, C_in]
             x_mark: Optional time features (unused, for interface compatibility)
-            
+
         Returns:
-            y: Output tensor [B, H, C_out]
+            y: Output tensor [B, H, C_out] in original (GlobalScaler) scale
         """
+        # RevIN: per-channel, per-sample normalization
+        means = x.mean(dim=1, keepdim=True).detach()                          # [B, 1, C_in]
+        stdev = (x.var(dim=1, keepdim=True, unbiased=False) + 1e-5).sqrt()    # [B, 1, C_in]
+        x = (x - means) / stdev
+
         # multiscale observations
-        x_scales = self.multiscale_inputs(x)  # [B,T_i,C_in]
-        # embed
-        z_scales = self.embed_multiscale(x_scales)  # [B,T_i,D]
-        # PDM encoder stack
+        x_scales = self.multiscale_inputs(x)
+        z_scales = self.embed_multiscale(x_scales)
         for pdm in self.pdm_blocks:
             z_scales = pdm(z_scales)
-        # FMM forecasting
-        future_latent = self.fmulti_predictor_mixing(z_scales)  # [B,H,D]
-        # output projection
-        y = self.output_projection(future_latent)  # [B,H,C_out]
-        return y
+        future_latent = self.fmulti_predictor_mixing(z_scales)  # [B, H, D]
+        y = self.output_projection(future_latent)                # [B, H, C_out]
+
+        if self.config.return_targets:
+            return y
+
+        # RevIN denormalize: map each output channel to its source input channel
+        if self.denorm_indices is not None:
+            s = stdev[:, :, self.denorm_indices]   # [B, 1, C_out]
+            m = means[:, :, self.denorm_indices]   # [B, 1, C_out]
+        else:
+            s = stdev[:, :, :self.output_features]
+            m = means[:, :, :self.output_features]
+        return y * s + m
     

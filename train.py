@@ -67,9 +67,9 @@ class TrainingConfig:
     # Training hyperparameters
     batch_size: int = 32
     epochs: int = 100
-    learning_rate: float = 0.001
+    learning_rate: float = 3e-4   # fix: was 1e-3, too high for 639-sample dataset
     weight_decay: float = 1e-5
-    patience: int = 10
+    patience: int = 20            # fix: was 10, models need more time to converge
     grad_clip: float = 1.0
     scheduler: Literal["cosine", "step", "none"] = "cosine"
     scheduler_step_size: int = 10
@@ -85,12 +85,18 @@ class TrainingConfig:
 
 
 def get_model_config(model_name: str, seq_len: int, pred_len: int,
-                     enc_in: int = 5, c_out: int = 2):
+                     enc_in: int = 5, c_out: int = 2,
+                     denorm_indices: tuple | None = None,
+                     return_targets: bool = False):
     """
     Get model config for stock price prediction.
-    
+
     Input: OHLCV or OHLCV+Vwap+Transactions (enc_in features)
     Output: High, Close + optional MA targets (c_out features)
+
+    denorm_indices maps each output channel to the input channel whose
+    per-sample mean/std should be used for NS-Norm / RevIN denormalization.
+    When return_targets=True, denormalization is skipped (model outputs returns).
     """
     if model_name == "TimesNet":
         return TimesNetConfig(
@@ -105,12 +111,19 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int,
             top_k=3,
             num_kernels=6,
             embed="fixed",
-            freq="h",
+            freq="d",
             dropout=0.1,
             num_class=c_out,
+            denorm_indices=denorm_indices,
+            return_targets=return_targets,
         )
     elif model_name == "TimeMixer":
         n_layers = 1 if seq_len % 4 != 0 else 2
+        min_scale = seq_len // (2 ** n_layers)
+        ma_kernel = min(25, min_scale - 2)
+        if ma_kernel % 2 == 0:
+            ma_kernel -= 1
+        ma_kernel = max(3, ma_kernel)
         return TimeMixerConfig(
             historical_lookback_length=seq_len,
             forecast_horizon_length=pred_len,
@@ -122,6 +135,9 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int,
             dropout_probability=0.1,
             downsampling_window_size=2,
             number_of_downsampling_layers=n_layers,
+            moving_average_kernel_size=ma_kernel,
+            denorm_indices=denorm_indices,
+            return_targets=return_targets,
         )
     else:
         raise ValueError(f"Unknown model: {model_name}")
@@ -234,9 +250,9 @@ def parse_args() -> argparse.Namespace:
     # Training hyperparameters
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
-    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
+    parser.add_argument("--patience", type=int, default=20, help="Early stopping patience")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping")
     parser.add_argument("--scheduler", type=str, default="cosine", choices=["cosine", "step", "none"])
 
@@ -370,6 +386,7 @@ def main():
         seq_len=train_cfg.seq_len,
         pred_len=train_cfg.pred_len,
         ma_targets=ma_targets,
+        return_targets=True,
     )
     val_dataset = ParquetDataset(
         ticker=train_cfg.ticker,
@@ -378,12 +395,15 @@ def main():
         seq_len=train_cfg.seq_len,
         pred_len=train_cfg.pred_len,
         ma_targets=ma_targets,
+        return_targets=True,
     )
-    
+
     model_cfg = get_model_config(
         train_cfg.model_name, train_cfg.seq_len, train_cfg.pred_len,
         enc_in=train_dataset.enc_in,
         c_out=train_dataset.c_out,
+        denorm_indices=train_dataset.denorm_indices,
+        return_targets=True,
     )
     
     print_config(train_cfg, model_cfg, train_dataset.target_features)

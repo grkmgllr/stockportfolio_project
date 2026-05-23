@@ -247,7 +247,7 @@ def parse_args() -> argparse.Namespace:
         description="Resample minute-bar parquet data to daily CSV."
     )
     parser.add_argument("--ticker", type=str, default="AAPL")
-    parser.add_argument("--start_date", type=str, default="2021-01-01")
+    parser.add_argument("--start_date", type=str, default="2015-10-01")
     parser.add_argument("--data_root", type=str, default="data/raw")
     parser.add_argument(
         "--input_path", type=str, default=None,
