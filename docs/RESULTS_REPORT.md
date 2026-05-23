@@ -247,7 +247,7 @@ The LightGBM meta-classifier was trained with Purged K-Fold cross-validation (3 
                         │
                         ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              resample_parquet.py                             │
+│           src/scripts/resample_parquet.py                    │
 │    Filter RTH (09:30-16:00) → Daily bars → Clean CSV        │
 │              939 trading days                                │
 └───────────────────────┬─────────────────────────────────────┘

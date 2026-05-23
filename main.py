@@ -18,6 +18,9 @@ import sys
 import json
 import time
 from datetime import datetime
+
+# Add src/ to Python path so internal imports work unchanged
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 from typing import List
 
 ALL_TICKERS = ["AAPL", "NVDA", "META", "GOOGL", "MSFT"]

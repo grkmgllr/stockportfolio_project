@@ -2,16 +2,19 @@
 Testing/Evaluation script for stock price forecasting.
 Evaluates High/Close (+ optional MA) predictions from OHLCV data.
 
-Usage:
-    python test.py --ticker AAPL
-    python test.py --ticker AAPL --model TimeMixer
-    python test.py --ticker AAPL --model LightGBM --ma_targets EMA_20 SMA_50 --save_predictions
+Usage (via main.py):
+    python main.py test --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META
+
+Direct usage:
+    python src/test.py --ticker AAPL --model TimeMixer
 """
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
-import os
 import argparse
 from dataclasses import dataclass, field
 from typing import List, Literal

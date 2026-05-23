@@ -3,11 +3,16 @@ Training script for stock price forecasting.
 Predicts High/Close (+ optional EMA_20/SMA_50) from OHLCV data using
 TimeMixer, TimesNet, or LightGBM.
 
-Usage:
-    python train.py --ticker AAPL
-    python train.py --ticker AAPL --model TimeMixer --epochs 100
-    python train.py --ticker AAPL --model LightGBM --ma_targets EMA_20 SMA_50
+Usage (via main.py):
+    python main.py train --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META
+    python main.py train --model LightGBM --ticker AAPL
+
+Direct usage:
+    python src/train.py --ticker AAPL --model TimeMixer --epochs 100
 """
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, ConcatDataset

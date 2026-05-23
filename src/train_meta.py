@@ -18,9 +18,11 @@ Usage
     python train_meta.py --ticker AAPL --threshold 0.6
 """
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import pandas as pd
 import numpy as np
-import os
 import argparse
 
 from models.meta_classifier.lightgbm_model import MetaClassifier

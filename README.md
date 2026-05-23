@@ -77,29 +77,31 @@ TimesNet  TimeMixer  LightGBM   Stage 1: Price Forecasting
 
 ```
 stockportfolio_project/
+├── main.py                          # Unified entry point (train/test/meta/run-all)
+├── src/
+│   ├── dataset.py                   # ParquetDataset (PyTorch Dataset, multi-ticker)
+│   ├── train.py                     # Training script (single/pooled multi-ticker)
+│   ├── test.py                      # Evaluation script (per-ticker metrics)
+│   ├── train_meta.py                # Meta-classifier training
+│   ├── train_hybrid.py              # Hybrid model training
+│   ├── utils.py                     # Metrics (MSE/MAE/IC/RIC/DA), early stopping
+│   ├── models/
+│   │   ├── TimeMixer/               # MLP-based multi-scale mixing
+│   │   ├── TimesNet/                # CNN-based temporal 2D variation
+│   │   ├── LightGBMForecaster/      # GBDT with return-based prediction
+│   │   └── meta_classifier/         # LightGBM binary classifier
+│   ├── trading_logic/
+│   │   ├── triple_barrier.py        # Triple Barrier Method (labeling)
+│   │   ├── purged_cv.py             # Purged K-Fold cross-validation
+│   │   └── evaluation.py            # Precision, F1, PSR metrics
+│   └── scripts/
+│       ├── resample_parquet.py      # Minute bars -> clean daily bars
+│       └── generate_meta_labels.py  # Feature engineering bridge
 ├── data/
-│   ├── raw/                      # Raw parquet + resampled daily CSVs (5 tickers)
-│   └── meta/                     # Meta-labels and predictions
-├── models/
-│   ├── TimesNet/                 # CNN-based temporal 2D variation
-│   ├── TimeMixer/                # MLP-based multi-scale mixing
-│   ├── LightGBMForecaster/       # GBDT with return-based prediction
-│   └── meta_classifier/          # LightGBM binary classifier
-├── trading_logic/
-│   ├── triple_barrier.py         # Triple Barrier Method (labeling)
-│   ├── purged_cv.py              # Purged K-Fold cross-validation
-│   └── evaluation.py             # Precision, F1, PSR metrics
-├── scripts/
-│   ├── resample_parquet.py       # Minute bars -> clean daily bars
-│   └── generate_meta_labels.py   # Feature engineering bridge
-├── docs/
-│   └── RESULTS_REPORT.md         # Full results report
-├── main.py                       # Unified entry point (train/test/meta/run-all)
-├── dataset.py                    # ParquetDataset (PyTorch Dataset, multi-ticker)
-├── train.py                      # Training script (single/pooled multi-ticker)
-├── test.py                       # Evaluation script (per-ticker metrics)
-├── train_meta.py                 # Meta-classifier training
-└── utils.py                      # Metrics (MSE/MAE/IC/RIC/DA), early stopping
+│   ├── raw/                         # Resampled daily CSVs (5 tickers)
+│   └── meta/                        # Meta-labels and predictions
+└── docs/
+    └── RESULTS_REPORT.md            # Full results report
 ```
 
 ## Quick Start
@@ -120,8 +122,8 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 Place your minute-bar parquet files in `data/raw/`, then resample:
 
 ```bash
-python scripts/resample_parquet.py --ticker AAPL --start_date 2022-01-01
-python scripts/resample_parquet.py --all   # All 5 tickers
+python src/scripts/resample_parquet.py --ticker AAPL --start_date 2022-01-01
+python src/scripts/resample_parquet.py --all   # All 5 tickers
 ```
 
 ### 3. Train & Test Models
@@ -141,26 +143,22 @@ python test.py --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META \
 **Single-ticker training:**
 
 ```bash
-python train.py --model TimeMixer --ticker AAPL --seq_len 30 --pred_len 5 --epochs 100
-python test.py  --model TimeMixer --ticker AAPL --seq_len 30 --pred_len 5
+python main.py train --model TimeMixer --ticker AAPL --seq_len 30 --pred_len 5 --epochs 100
+python main.py test  --model TimeMixer --ticker AAPL --seq_len 30 --pred_len 5
 ```
 
-**Via unified entry point (main.py):**
+**Full pipeline:**
 
 ```bash
-python main.py train --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META --epochs 200
-python main.py test  --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META
-python main.py run-all --model TimeMixer --ticker AAPL  # Full pipeline (train+test+meta)
+python main.py run-all --model TimeMixer --ticker AAPL  # train+test+meta in one command
 ```
 
 ### 4. Meta-Labeling Pipeline
 
 ```bash
-# Generate meta-labels from primary model predictions
-python scripts/generate_meta_labels.py --ticker AAPL --seq_len 30 --pred_len 5
-
-# Train meta-classifier
-python train_meta.py --ticker AAPL
+python main.py meta-label --ticker AAPL --seq_len 30 --pred_len 5
+python main.py train-meta --ticker AAPL
+python main.py evaluate --ticker AAPL
 ```
 
 ## Models
