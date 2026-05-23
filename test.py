@@ -19,7 +19,7 @@ from typing import List, Literal
 import pandas as pd
 
 from dataset import ParquetDataset
-from utils import load_checkpoint, calculate_metrics
+from utils import load_checkpoint, calculate_metrics, calculate_return_metrics
 
 # Import models
 from models import (
@@ -173,9 +173,14 @@ def evaluate(model, test_loader, criterion, device, dataset):
         'test_loss': np.average(test_loss),
     }
 
+    # Return-based metrics (IC, RIC, DA) computed on raw returns
+    results['overall_returns'] = calculate_return_metrics(all_preds, all_trues)
     for i, name in enumerate(dataset.target_features):
         results[name] = calculate_metrics(
             preds_original[:, :, i], trues_original[:, :, i],
+        )
+        results[f'{name}_returns'] = calculate_return_metrics(
+            all_preds[:, :, i], all_trues[:, :, i],
         )
 
     return results, preds_original, trues_original
@@ -188,7 +193,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--ticker", type=str, default="AAPL", help="Stock ticker")
-    parser.add_argument("--model", type=str, default="TimesNet", 
+    parser.add_argument("--tickers", nargs="+", default=None,
+                        help="Evaluate pooled model on each ticker separately")
+    parser.add_argument("--model", type=str, default="TimesNet",
                         choices=["TimeMixer", "TimesNet", "LightGBM"])
     parser.add_argument("--seq_len", type=int, default=30)
     parser.add_argument("--pred_len", type=int, default=5)
@@ -218,6 +225,24 @@ def print_results(results: dict, target_names: List[str]) -> None:
         print(f"  MSE:  {results[name]['MSE']:.4f}")
         print(f"  MAE:  {results[name]['MAE']:.4f}")
         print(f"  RMSE: {results[name]['RMSE']:.4f}")
+
+    if 'overall_returns' in results:
+        rm = results['overall_returns']
+        print(f"\n{'=' * 60}")
+        print("RETURN-BASED METRICS")
+        print(f"{'=' * 60}")
+        print(f"\nOverall:")
+        print(f"  IC  (Pearson):  {rm['IC']:.4f}")
+        print(f"  RIC (Spearman): {rm['RIC']:.4f}")
+        print(f"  DA  (Direction): {rm['DA']:.2%}")
+        for name in target_names:
+            key = f'{name}_returns'
+            if key in results:
+                rm_t = results[key]
+                print(f"\n{name}:")
+                print(f"  IC:  {rm_t['IC']:.4f}")
+                print(f"  RIC: {rm_t['RIC']:.4f}")
+                print(f"  DA:  {rm_t['DA']:.2%}")
     print("=" * 60)
 
 
@@ -264,11 +289,14 @@ def _evaluate_lightgbm(args):
     return preds, trues, forecaster.target_features
 
 
-def _evaluate_pytorch(args):
-    """Load and evaluate a PyTorch model. Returns (preds, trues, target_names)."""
+def _evaluate_pytorch(args, ticker_override: str | None = None,
+                      checkpoint_override: str | None = None):
+    """Load and evaluate a PyTorch model. Returns (preds, trues, target_names, eval_results)."""
+    ticker = ticker_override or args.ticker
+
     test_cfg = TestConfig(
         model_name=args.model,
-        ticker=args.ticker,
+        ticker=ticker,
         data_root=args.data_root,
         seq_len=args.seq_len,
         pred_len=args.pred_len,
@@ -281,9 +309,9 @@ def _evaluate_pytorch(args):
 
     ma_targets = args.ma_targets or []
 
-    print("Loading Test Data...")
+    print(f"Loading Test Data for {ticker}...")
     test_dataset = ParquetDataset(
-        ticker=test_cfg.ticker,
+        ticker=ticker,
         root_path=test_cfg.data_root,
         flag='test',
         seq_len=test_cfg.seq_len,
@@ -311,9 +339,8 @@ def _evaluate_pytorch(args):
 
     model = get_model(test_cfg.model_name, model_cfg).to(test_cfg.device)
 
-    if args.checkpoint:
-        checkpoint_path = args.checkpoint
-    else:
+    checkpoint_path = checkpoint_override or args.checkpoint
+    if not checkpoint_path:
         checkpoint_path = os.path.join(
             test_cfg.checkpoint_dir,
             f"{test_cfg.ticker}_{test_cfg.model_name}_best.pt"
@@ -331,43 +358,71 @@ def _evaluate_pytorch(args):
     print("-" * 60)
 
     criterion = nn.MSELoss()
-    _, preds, trues = evaluate(
+    eval_results, preds, trues = evaluate(
         model, test_loader, criterion, test_cfg.device, test_dataset
     )
 
-    return preds, trues, test_dataset.target_features
+    return preds, trues, test_dataset.target_features, eval_results
 
 
 def main():
     args = parse_args()
 
+    tickers = args.tickers or [args.ticker]
+    is_pooled = len(tickers) > 1
+
     print("\n" + "=" * 60)
     print("Stock Price Forecasting - Evaluation")
     print("=" * 60)
-    print(f"Ticker: {args.ticker}")
+    if is_pooled:
+        print(f"Tickers: {', '.join(tickers)} (pooled model)")
+    else:
+        print(f"Ticker: {tickers[0]}")
     print(f"Model: {args.model}")
     print(f"Lookback: {args.seq_len} days | Forecast: {args.pred_len} days")
     if args.ma_targets:
         print(f"MA targets: {args.ma_targets}")
     print("=" * 60 + "\n")
 
-    # Get predictions (model-specific loading)
-    if args.model == "LightGBM":
-        preds, trues, target_names = _evaluate_lightgbm(args)
-    else:
-        preds, trues, target_names = _evaluate_pytorch(args)
+    # For pooled models, the checkpoint uses "pooled" as the ticker name
+    checkpoint_name = None
+    if is_pooled and not args.checkpoint:
+        checkpoint_name = os.path.join(
+            args.checkpoint_dir,
+            f"pooled_{args.model}_best.pt"
+        )
 
-    # Shared: compute metrics, print, save
-    results = {"overall": calculate_metrics(preds, trues)}
-    for i, name in enumerate(target_names):
-        results[name] = calculate_metrics(preds[:, :, i], trues[:, :, i])
+    all_results = {}
+    for ticker in tickers:
+        if is_pooled:
+            print(f"\n{'─'*60}")
+            print(f"  Evaluating {ticker}")
+            print(f"{'─'*60}")
 
-    print_results(results, target_names)
+        eval_results = None
+        if args.model == "LightGBM":
+            preds, trues, target_names = _evaluate_lightgbm(args)
+        else:
+            preds, trues, target_names, eval_results = _evaluate_pytorch(
+                args, ticker_override=ticker, checkpoint_override=checkpoint_name,
+            )
 
-    if args.save_predictions:
-        save_predictions(args.ticker, preds, trues)
+        results = {"overall": calculate_metrics(preds, trues)}
+        for i, name in enumerate(target_names):
+            results[name] = calculate_metrics(preds[:, :, i], trues[:, :, i])
 
-    return results
+        if eval_results:
+            for key in eval_results:
+                if key.endswith('_returns'):
+                    results[key] = eval_results[key]
+
+        print_results(results, target_names)
+        all_results[ticker] = results
+
+        if args.save_predictions:
+            save_predictions(ticker, preds, trues)
+
+    return all_results
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ class ParquetDataset(Dataset):
         val_ratio: float = 0.15,
         ma_targets: Optional[List[str]] = None,
         return_targets: bool = False,
+        start_date: Optional[str] = "2022-01-01",
     ):
         """
         Args:
@@ -65,6 +66,8 @@ class ParquetDataset(Dataset):
             val_ratio: Ratio of data for validation (default: 0.15)
             ma_targets: List of MA target names to predict (e.g. ['EMA_20', 'SMA_50']).
                         Keys must exist in MA_CONFIGS. Pass None or [] to disable.
+            start_date: Filter data to rows on or after this date (default: '2022-01-01').
+                        Set to None to use all available data.
         """
         self.ticker = ticker
         self.root_path = root_path
@@ -73,6 +76,7 @@ class ParquetDataset(Dataset):
         self.pred_len = pred_len
         self.scale = scale
         self.return_targets = return_targets
+        self.start_date = start_date
         
         # Default features (resolved in _load_data after reading the CSV)
         self._input_features_override = input_features
@@ -136,7 +140,15 @@ class ParquetDataset(Dataset):
             )
         
         df_raw = pd.read_csv(file_path)
-        
+
+        # Filter by start_date if specified
+        if self.start_date and 'Date' in df_raw.columns:
+            n_before = len(df_raw)
+            df_raw = df_raw[df_raw['Date'] >= self.start_date].reset_index(drop=True)
+            if self.flag == 'train' and n_before != len(df_raw):
+                print(f"[{self.ticker}] Filtered to {self.start_date}+: "
+                      f"{n_before} → {len(df_raw)} rows")
+
         # Handle missing values with forward fill then backward fill
         df_raw = df_raw.ffill().bfill()
         

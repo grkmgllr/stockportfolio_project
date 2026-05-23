@@ -10,7 +10,7 @@ Usage:
 """
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 import numpy as np
 import time
 import os
@@ -154,12 +154,16 @@ def get_model(model_name: str, config):
 
 
 def print_config(train_cfg: TrainingConfig, model_cfg,
-                 target_names: List[str]) -> None:
+                 target_names: List[str],
+                 tickers: List[str] | None = None) -> None:
     """Print configuration summary."""
     print("\n" + "=" * 60)
     print("Stock Price Forecasting - Training Configuration")
     print("=" * 60)
-    print(f"Ticker: {train_cfg.ticker}")
+    if tickers and len(tickers) > 1:
+        print(f"Tickers: {', '.join(tickers)} (pooled)")
+    else:
+        print(f"Ticker: {train_cfg.ticker}")
     print(f"Model: {train_cfg.model_name}")
     print(f"Device: {train_cfg.device}")
     targets_str = ", ".join(target_names)
@@ -226,12 +230,18 @@ def parse_args() -> argparse.Namespace:
         description="Train stock price forecasting model (predict High/Close from OHLCV)"
     )
 
-    # Required
+    # Ticker(s)
     parser.add_argument(
         "--ticker",
         type=str,
         default="AAPL",
         help="Stock ticker symbol (default: AAPL)",
+    )
+    parser.add_argument(
+        "--tickers",
+        nargs="+",
+        default=None,
+        help="Multiple tickers for pooled training (e.g. --tickers AAPL MSFT GOOGL NVDA META)",
     )
     
     # Model
@@ -355,9 +365,14 @@ def main():
         return
 
     # ── PyTorch branch (TimesNet / TimeMixer) ──
+
+    # Resolve ticker list: --tickers overrides --ticker
+    tickers = args.tickers or [args.ticker]
+    label = "pooled" if len(tickers) > 1 else tickers[0]
+
     train_cfg = TrainingConfig(
         model_name=args.model,
-        ticker=args.ticker,
+        ticker=label,
         data_root=args.data_root,
         seq_len=args.seq_len,
         pred_len=args.pred_len,
@@ -370,44 +385,58 @@ def main():
         scheduler=args.scheduler,
         checkpoint_dir=args.checkpoint_dir,
     )
-    
+
     if args.device:
         train_cfg.device = args.device
-    
+
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
-    
+
     ma_targets = args.ma_targets or []
 
     print("Loading Data...")
-    train_dataset = ParquetDataset(
-        ticker=train_cfg.ticker,
-        root_path=train_cfg.data_root,
-        flag='train',
-        seq_len=train_cfg.seq_len,
-        pred_len=train_cfg.pred_len,
-        ma_targets=ma_targets,
-        return_targets=True,
-    )
-    val_dataset = ParquetDataset(
-        ticker=train_cfg.ticker,
-        root_path=train_cfg.data_root,
-        flag='val',
-        seq_len=train_cfg.seq_len,
-        pred_len=train_cfg.pred_len,
-        ma_targets=ma_targets,
-        return_targets=True,
-    )
+    train_datasets = []
+    val_datasets = []
+    for t in tickers:
+        train_datasets.append(ParquetDataset(
+            ticker=t,
+            root_path=train_cfg.data_root,
+            flag='train',
+            seq_len=train_cfg.seq_len,
+            pred_len=train_cfg.pred_len,
+            ma_targets=ma_targets,
+            return_targets=True,
+        ))
+        val_datasets.append(ParquetDataset(
+            ticker=t,
+            root_path=train_cfg.data_root,
+            flag='val',
+            seq_len=train_cfg.seq_len,
+            pred_len=train_cfg.pred_len,
+            ma_targets=ma_targets,
+            return_targets=True,
+        ))
+
+    # Use ConcatDataset for pooled multi-ticker training
+    if len(tickers) > 1:
+        train_dataset = ConcatDataset(train_datasets)
+        val_dataset = ConcatDataset(val_datasets)
+    else:
+        train_dataset = train_datasets[0]
+        val_dataset = val_datasets[0]
+
+    # Use first ticker's dataset for metadata (all share same features)
+    ref_dataset = train_datasets[0]
 
     model_cfg = get_model_config(
         train_cfg.model_name, train_cfg.seq_len, train_cfg.pred_len,
-        enc_in=train_dataset.enc_in,
-        c_out=train_dataset.c_out,
-        denorm_indices=train_dataset.denorm_indices,
+        enc_in=ref_dataset.enc_in,
+        c_out=ref_dataset.c_out,
+        denorm_indices=ref_dataset.denorm_indices,
         return_targets=True,
     )
-    
-    print_config(train_cfg, model_cfg, train_dataset.target_features)
-    
+
+    print_config(train_cfg, model_cfg, ref_dataset.target_features, tickers)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_cfg.batch_size,
@@ -420,8 +449,11 @@ def main():
         shuffle=False,
         drop_last=True,
     )
-    
+
     print(f"\nTrain samples: {len(train_dataset)}")
+    if len(tickers) > 1:
+        for ds in train_datasets:
+            print(f"  {ds.ticker}: {len(ds)}")
     print(f"Val samples: {len(val_dataset)}")
     
     model = get_model(train_cfg.model_name, model_cfg).to(train_cfg.device)

@@ -77,14 +77,15 @@ def cmd_resample(args):
 
 
 def cmd_train(args):
-    ticker = args.ticker
+    tickers = args.tickers if hasattr(args, 'tickers') and args.tickers else [args.ticker]
     model_name = args.model
     ma_targets = args.ma_targets or []
 
     if model_name == "LightGBM":
-        _train_lightgbm(args, ticker, ma_targets)
+        for t in tickers:
+            _train_lightgbm(args, t, ma_targets)
     else:
-        _train_pytorch(args, ticker, model_name, ma_targets)
+        _train_pytorch(args, tickers, model_name, ma_targets)
 
 
 def _train_lightgbm(args, ticker: str, ma_targets: List[str]):
@@ -120,10 +121,9 @@ def _train_lightgbm(args, ticker: str, ma_targets: List[str]):
         print(f"  {name:25s}: {score:.1f}")
 
 
-def _train_pytorch(args, ticker: str, model_name: str, ma_targets: List[str]):
+def _train_pytorch(args, tickers: List[str], model_name: str, ma_targets: List[str]):
     sys.argv = [
         "train.py",
-        "--ticker", ticker,
         "--model", model_name,
         "--seq_len", str(args.seq_len),
         "--pred_len", str(args.pred_len),
@@ -132,6 +132,10 @@ def _train_pytorch(args, ticker: str, model_name: str, ma_targets: List[str]):
         "--lr", str(args.lr),
         "--data_root", args.data_root,
     ]
+    if len(tickers) > 1:
+        sys.argv += ["--tickers"] + tickers
+    else:
+        sys.argv += ["--ticker", tickers[0]]
     if ma_targets:
         sys.argv += ["--ma_targets"] + ma_targets
 
@@ -141,43 +145,77 @@ def _train_pytorch(args, ticker: str, model_name: str, ma_targets: List[str]):
 
 def cmd_test(args):
     import numpy as np
-    from utils import calculate_metrics
+    from utils import calculate_metrics, calculate_return_metrics
 
-    ticker = args.ticker
+    tickers = args.tickers if hasattr(args, 'tickers') and args.tickers else [args.ticker]
     model_name = args.model
     ma_targets = args.ma_targets or []
+    is_pooled = len(tickers) > 1
 
-    if model_name == "LightGBM":
-        preds, trues, target_names = _test_lightgbm(args, ticker, ma_targets)
-    else:
-        preds, trues, target_names = _test_pytorch(args, ticker, model_name, ma_targets)
+    # For pooled models, checkpoint uses "pooled" prefix
+    checkpoint_name = None
+    if is_pooled:
+        checkpoint_name = os.path.join(
+            CHECKPOINTS_ROOT, f"pooled_{model_name}_best.pt"
+        )
 
-    results = {"overall": calculate_metrics(preds, trues)}
-    for i, name in enumerate(target_names):
-        results[name] = calculate_metrics(preds[:, :, i], trues[:, :, i])
+    all_results = {}
+    for ticker in tickers:
+        if is_pooled:
+            print(f"\n{'─'*60}")
+            print(f"  Evaluating {ticker}")
+            print(f"{'─'*60}")
 
-    print(f"\n{'='*60}")
-    print(f"  TEST RESULTS — {ticker} / {model_name}")
-    print(f"{'='*60}")
-    print(f"  Overall MAE:  ${results['overall']['MAE']:.4f}")
-    print(f"  Overall RMSE: ${results['overall']['RMSE']:.4f}")
-    for name in target_names:
-        print(f"  {name:8s} MAE:  ${results[name]['MAE']:.4f}  RMSE: ${results[name]['RMSE']:.4f}")
-    print(f"{'='*60}")
+        eval_results = None
+        if model_name == "LightGBM":
+            preds, trues, target_names = _test_lightgbm(args, ticker, ma_targets)
+        else:
+            preds, trues, target_names, eval_results = _test_pytorch(
+                args, ticker, model_name, ma_targets,
+                checkpoint_override=checkpoint_name,
+            )
 
-    out_dir = _results_dir(ticker, model_name)
-    np.save(os.path.join(out_dir, "predictions.npy"), preds)
-    np.save(os.path.join(out_dir, "ground_truth.npy"), trues)
+        results = {"overall": calculate_metrics(preds, trues)}
+        for i, name in enumerate(target_names):
+            results[name] = calculate_metrics(preds[:, :, i], trues[:, :, i])
 
-    # Also save to legacy location for meta-label compatibility
-    np.save(os.path.join(RESULTS_ROOT, f"{ticker}_predictions.npy"), preds)
-    np.save(os.path.join(RESULTS_ROOT, f"{ticker}_ground_truth.npy"), trues)
+        if eval_results:
+            for key in eval_results:
+                if key.endswith('_returns'):
+                    results[key] = eval_results[key]
 
-    config = {"ticker": ticker, "model": model_name, "seq_len": args.seq_len, "pred_len": args.pred_len}
-    run_file = _save_run_metrics(out_dir, results, config)
-    print(f"  Metrics saved: {run_file}")
+        print(f"\n{'='*60}")
+        print(f"  TEST RESULTS — {ticker} / {model_name}")
+        print(f"{'='*60}")
+        print(f"  Overall MAE:  ${results['overall']['MAE']:.4f}")
+        print(f"  Overall RMSE: ${results['overall']['RMSE']:.4f}")
+        for name in target_names:
+            print(f"  {name:8s} MAE:  ${results[name]['MAE']:.4f}  RMSE: ${results[name]['RMSE']:.4f}")
 
-    return results
+        if 'overall_returns' in results:
+            print(f"\n  RETURN-BASED METRICS")
+            rm = results['overall_returns']
+            print(f"  Overall IC:  {rm['IC']:.4f}  RIC: {rm['RIC']:.4f}  DA: {rm['DA']:.2%}")
+            for name in target_names:
+                key = f'{name}_returns'
+                if key in results:
+                    rm_t = results[key]
+                    print(f"  {name:8s} IC:  {rm_t['IC']:.4f}  RIC: {rm_t['RIC']:.4f}  DA: {rm_t['DA']:.2%}")
+        print(f"{'='*60}")
+
+        out_dir = _results_dir(ticker, model_name)
+        np.save(os.path.join(out_dir, "predictions.npy"), preds)
+        np.save(os.path.join(out_dir, "ground_truth.npy"), trues)
+        np.save(os.path.join(RESULTS_ROOT, f"{ticker}_predictions.npy"), preds)
+        np.save(os.path.join(RESULTS_ROOT, f"{ticker}_ground_truth.npy"), trues)
+
+        config = {"ticker": ticker, "model": model_name, "seq_len": args.seq_len, "pred_len": args.pred_len}
+        run_file = _save_run_metrics(out_dir, results, config)
+        print(f"  Metrics saved: {run_file}")
+
+        all_results[ticker] = results
+
+    return all_results
 
 
 def _test_lightgbm(args, ticker: str, ma_targets: List[str]):
@@ -210,7 +248,8 @@ def _test_lightgbm(args, ticker: str, ma_targets: List[str]):
     return preds, trues, forecaster.target_features
 
 
-def _test_pytorch(args, ticker: str, model_name: str, ma_targets: List[str]):
+def _test_pytorch(args, ticker: str, model_name: str, ma_targets: List[str],
+                   checkpoint_override: str | None = None):
     import torch
     from torch.utils.data import DataLoader
     from dataset import ParquetDataset
@@ -223,25 +262,29 @@ def _test_pytorch(args, ticker: str, model_name: str, ma_targets: List[str]):
         seq_len=args.seq_len,
         pred_len=args.pred_len,
         ma_targets=ma_targets,
+        return_targets=True,
     )
 
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False)
 
-    from train import get_model_config, get_model
+    from test import get_model_config, get_model, evaluate
     model_cfg = get_model_config(model_name, args.seq_len, args.pred_len,
-                                  enc_in=test_dataset.enc_in, c_out=test_dataset.c_out)
+                                  enc_in=test_dataset.enc_in, c_out=test_dataset.c_out,
+                                  denorm_indices=test_dataset.denorm_indices,
+                                  return_targets=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = get_model(model_name, model_cfg).to(device)
 
-    checkpoint_path = os.path.join(CHECKPOINTS_ROOT, f"{ticker}_{model_name}_best.pt")
+    checkpoint_path = checkpoint_override or os.path.join(
+        CHECKPOINTS_ROOT, f"{ticker}_{model_name}_best.pt"
+    )
     load_checkpoint(model, checkpoint_path, device)
 
-    from test import evaluate
     import torch.nn as nn
     criterion = nn.MSELoss()
-    _, preds, trues = evaluate(model, test_loader, criterion, device, test_dataset)
+    eval_results, preds, trues = evaluate(model, test_loader, criterion, device, test_dataset)
 
-    return preds, trues, test_dataset.target_features
+    return preds, trues, test_dataset.target_features, eval_results
 
 
 def cmd_meta_label(args):
@@ -335,6 +378,8 @@ def build_parser() -> argparse.ArgumentParser:
     # --- shared args for model commands ---
     def add_common_args(p):
         p.add_argument("--ticker", type=str, default="AAPL")
+        p.add_argument("--tickers", nargs="+", default=None,
+                       help="Multiple tickers for pooled training/eval (e.g. AAPL MSFT GOOGL)")
         p.add_argument("--model", type=str, default="LightGBM",
                        choices=["LightGBM", "TimesNet", "TimeMixer"])
         p.add_argument("--seq_len", type=int, default=30)
@@ -348,7 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(p_train)
     p_train.add_argument("--epochs", type=int, default=100)
     p_train.add_argument("--batch_size", type=int, default=32)
-    p_train.add_argument("--lr", type=float, default=0.001)
+    p_train.add_argument("--lr", type=float, default=3e-4)
 
     # --- test ---
     p_test = subparsers.add_parser("test", help="Evaluate a trained model")
@@ -378,7 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(p_all)
     p_all.add_argument("--epochs", type=int, default=100)
     p_all.add_argument("--batch_size", type=int, default=32)
-    p_all.add_argument("--lr", type=float, default=0.001)
+    p_all.add_argument("--lr", type=float, default=3e-4)
     p_all.add_argument("--threshold", type=float, default=0.5)
 
     return parser

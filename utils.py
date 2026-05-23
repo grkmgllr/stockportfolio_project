@@ -9,6 +9,7 @@ This module provides:
 """
 import torch
 import numpy as np
+from scipy import stats
 import os
 from typing import Optional, Dict
 
@@ -89,33 +90,61 @@ class EarlyStopping:
 def calculate_metrics(pred: np.ndarray, true: np.ndarray) -> Dict[str, float]:
     """
     Calculate regression metrics for forecasting evaluation.
-    
-    Computes Mean Squared Error (MSE), Mean Absolute Error (MAE), 
-    and Root Mean Squared Error (RMSE) between predictions and ground truth.
-    
+
     Args:
         pred: Predictions array of any shape
         true: Ground truth array (same shape as pred)
-        
+
     Returns:
-        Dictionary containing:
-            - MSE: Mean Squared Error
-            - MAE: Mean Absolute Error  
-            - RMSE: Root Mean Squared Error
-    
-    Example:
-        >>> metrics = calculate_metrics(predictions, targets)
-        >>> print(f"MAE: ${metrics['MAE']:.2f}")
+        Dictionary with MSE, MAE, RMSE.
     """
     mse = np.mean((pred - true) ** 2)
     mae = np.mean(np.abs(pred - true))
     rmse = np.sqrt(mse)
-    
+
     return {
         'MSE': float(mse),
         'MAE': float(mae),
         'RMSE': float(rmse),
     }
+
+
+def calculate_return_metrics(
+    pred_returns: np.ndarray,
+    true_returns: np.ndarray,
+) -> Dict[str, float]:
+    """
+    Calculate return-based metrics following Fan & Shen [2024], Wang et al. [2025].
+
+    Computes Information Coefficient (IC) and Rank Information Coefficient (RIC)
+    between predicted and realised returns.
+
+    IC  = Pearson correlation  (linear agreement)
+    RIC = Spearman correlation (rank-order agreement)
+
+    Args:
+        pred_returns: Predicted returns, shape [N, pred_len] or [N, pred_len, C].
+        true_returns: Actual returns, same shape.
+
+    Returns:
+        Dictionary with IC, RIC, and directional accuracy (DA).
+    """
+    p = pred_returns.flatten()
+    t = true_returns.flatten()
+
+    mask = np.isfinite(p) & np.isfinite(t)
+    p, t = p[mask], t[mask]
+
+    if len(p) < 3:
+        return {'IC': float('nan'), 'RIC': float('nan'), 'DA': float('nan')}
+
+    ic = float(np.corrcoef(p, t)[0, 1])
+    ric = float(stats.spearmanr(p, t).statistic)
+
+    # Directional accuracy: fraction of times predicted sign matches actual sign
+    da = float(np.mean(np.sign(p) == np.sign(t)))
+
+    return {'IC': ic, 'RIC': ric, 'DA': da}
 
 
 def load_checkpoint(model: torch.nn.Module, checkpoint_path: str, 
