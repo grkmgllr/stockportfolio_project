@@ -249,30 +249,39 @@ def print_results(results: dict, target_names: List[str]) -> None:
     print("=" * 60)
 
 
-def save_predictions(ticker: str, preds: np.ndarray, trues: np.ndarray) -> None:
-    """Save predictions and ground truth as .npy files."""
-    output_dir = "results"
+def save_predictions(ticker: str, preds: np.ndarray, trues: np.ndarray,
+                     model_name: str | None = None) -> None:
+    """Save predictions and ground truth as .npy files.
+
+    When *model_name* is given, files are saved under ``results/{model_name}/``
+    so that different primary models' outputs don't overwrite each other.
+    """
+    if model_name:
+        output_dir = os.path.join("results", model_name)
+    else:
+        output_dir = "results"
     os.makedirs(output_dir, exist_ok=True)
     np.save(os.path.join(output_dir, f"{ticker}_predictions.npy"), preds)
     np.save(os.path.join(output_dir, f"{ticker}_ground_truth.npy"), trues)
     print(f"\nPredictions saved to {output_dir}/")
 
 
-def _evaluate_lightgbm(args):
+def _evaluate_lightgbm(args, ticker_override: str | None = None,
+                       checkpoint_override: str | None = None):
     """Load and evaluate a LightGBM forecaster. Returns (preds, trues, target_names)."""
     from train import _load_raw_df
 
+    ticker = ticker_override or args.ticker
     ma_targets = args.ma_targets or []
     df, train_end, val_end, target_features = _load_raw_df(
-        args.ticker, args.data_root, ma_targets,
+        ticker, args.data_root, ma_targets,
     )
 
-    if args.checkpoint:
-        checkpoint_path = args.checkpoint
-    else:
+    checkpoint_path = checkpoint_override or args.checkpoint
+    if not checkpoint_path:
         checkpoint_path = os.path.join(
             args.checkpoint_dir,
-            f"{args.ticker}_LightGBM_best.joblib",
+            f"{ticker}_LightGBM_best.joblib",
         )
 
     if not os.path.exists(checkpoint_path):
@@ -390,10 +399,16 @@ def main():
     # For pooled models, the checkpoint uses "pooled" as the ticker name
     checkpoint_name = None
     if is_pooled and not args.checkpoint:
-        checkpoint_name = os.path.join(
-            args.checkpoint_dir,
-            f"pooled_{args.model}_best.pt"
-        )
+        if args.model == "LightGBM":
+            checkpoint_name = os.path.join(
+                args.checkpoint_dir,
+                f"pooled_LightGBM_best.joblib"
+            )
+        else:
+            checkpoint_name = os.path.join(
+                args.checkpoint_dir,
+                f"pooled_{args.model}_best.pt"
+            )
 
     all_results = {}
     for ticker in tickers:
@@ -404,7 +419,29 @@ def main():
 
         eval_results = None
         if args.model == "LightGBM":
-            preds, trues, target_names = _evaluate_lightgbm(args)
+            preds, trues, target_names = _evaluate_lightgbm(
+                args, ticker_override=ticker, checkpoint_override=checkpoint_name,
+            )
+            # Compute IC/RIC/DA for LightGBM using price-based returns
+            # preds and trues are absolute prices; convert to returns for IC/RIC/DA
+            from train import _load_raw_df
+            ma_targets_lgb = args.ma_targets or []
+            df_lgb, _, val_end_lgb, _ = _load_raw_df(
+                ticker, args.data_root, ma_targets_lgb,
+            )
+            history_start_lgb = max(0, val_end_lgb - args.seq_len - 30)
+            anchor_start = history_start_lgb + args.seq_len
+            anchor_end = anchor_start + preds.shape[0]
+            anchors = df_lgb["Close"].values[anchor_start:anchor_end]
+            pred_returns = (preds - anchors[:, None, None]) / anchors[:, None, None]
+            true_returns = (trues - anchors[:, None, None]) / anchors[:, None, None]
+            eval_results = {
+                "overall_returns": calculate_return_metrics(pred_returns, true_returns),
+            }
+            for i, name in enumerate(target_names):
+                eval_results[f"{name}_returns"] = calculate_return_metrics(
+                    pred_returns[:, :, i], true_returns[:, :, i]
+                )
         else:
             preds, trues, target_names, eval_results = _evaluate_pytorch(
                 args, ticker_override=ticker, checkpoint_override=checkpoint_name,
@@ -423,7 +460,7 @@ def main():
         all_results[ticker] = results
 
         if args.save_predictions:
-            save_predictions(ticker, preds, trues)
+            save_predictions(ticker, preds, trues, model_name=args.model)
 
     return all_results
 

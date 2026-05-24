@@ -323,16 +323,42 @@ def _load_raw_df(ticker: str, data_root: str, ma_targets: List[str],
 
 
 def train_lightgbm(args):
-    """Train a LightGBM forecaster (no PyTorch needed)."""
+    """Train a LightGBM forecaster (no PyTorch needed).
+
+    Supports pooled multi-ticker training via --tickers flag.
+    When multiple tickers are given, their train/val DataFrames are
+    concatenated (with index reset) so a single model learns from
+    all stocks simultaneously.  Return-based targets make this
+    possible since all tickers share the same scale.
+    """
     ma_targets = args.ma_targets or []
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
-    df, train_end, val_end, target_features = _load_raw_df(
-        args.ticker, args.data_root, ma_targets,
-    )
+    tickers = args.tickers or [args.ticker]
+    is_pooled = len(tickers) > 1
+    label = "pooled" if is_pooled else tickers[0]
 
-    df_train = df.iloc[:train_end].copy()
-    df_val = df.iloc[train_end:val_end].copy()
+    if is_pooled:
+        print(f"\nPooled LightGBM training: {', '.join(tickers)}")
+
+    train_dfs = []
+    val_dfs = []
+    target_features = None
+
+    for t in tickers:
+        df, train_end, val_end, tf = _load_raw_df(t, args.data_root, ma_targets)
+        train_dfs.append(df.iloc[:train_end].copy())
+        val_dfs.append(df.iloc[train_end:val_end].copy())
+        if target_features is None:
+            target_features = tf
+        if is_pooled:
+            print(f"  {t}: train={train_end}, val={val_end - train_end}")
+
+    df_train = pd.concat(train_dfs, ignore_index=True)
+    df_val = pd.concat(val_dfs, ignore_index=True)
+
+    if is_pooled:
+        print(f"  Total: train={len(df_train)}, val={len(df_val)}")
 
     forecaster = LightGBMForecaster(
         seq_len=args.seq_len,
@@ -355,7 +381,7 @@ def train_lightgbm(args):
 
     checkpoint_path = os.path.join(
         args.checkpoint_dir,
-        f"{args.ticker}_LightGBM_best.joblib",
+        f"{label}_LightGBM_best.joblib",
     )
     forecaster.save(checkpoint_path)
     print(f"\nCheckpoint: {checkpoint_path}")
@@ -366,6 +392,9 @@ def main():
 
     # ── LightGBM branch (no PyTorch) ──
     if args.model == "LightGBM":
+        # Ensure tickers list is available for pooled LightGBM
+        if not hasattr(args, 'tickers') or args.tickers is None:
+            args.tickers = [args.ticker]
         train_lightgbm(args)
         return
 
