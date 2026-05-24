@@ -1,4 +1,6 @@
 import os, sys
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+os.environ['OMP_NUM_THREADS'] = '1'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import random
