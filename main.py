@@ -32,16 +32,19 @@ META_ROOT = "data/meta"
 
 
 def _results_dir(ticker: str, model: str) -> str:
+    """Return ``results/{ticker}/{model}/`` and create it if missing."""
     path = os.path.join(RESULTS_ROOT, ticker, model)
     os.makedirs(path, exist_ok=True)
     return path
 
 
 def _save_run_metrics(results_dir: str, metrics: dict, config: dict) -> str:
+    """Save metrics + config as a timestamped JSON for later comparison."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_file = os.path.join(results_dir, f"run_{timestamp}.json")
     payload = {"timestamp": timestamp, "config": config, "metrics": metrics}
     with open(run_file, "w") as f:
+        # default=str so numpy scalars / Timestamps don't crash json.dump
         json.dump(payload, f, indent=2, default=str)
     return run_file
 
@@ -51,6 +54,7 @@ def _save_run_metrics(results_dir: str, metrics: dict, config: dict) -> str:
 # ─────────────────────────────────────────────────────────────────────
 
 def cmd_resample(args):
+    """Resample minute-bar parquet files to daily CSVs in data/raw/."""
     from scripts.resample_parquet import resample_minute_to_daily, find_parquet_file
     import pandas as pd
 
@@ -80,18 +84,22 @@ def cmd_resample(args):
 
 
 def cmd_train(args):
+    """Train the primary forecasting model (LightGBM or PyTorch)."""
     tickers = args.tickers if hasattr(args, 'tickers') and args.tickers else [args.ticker]
     model_name = args.model
     ma_targets = args.ma_targets or []
 
     if model_name == "LightGBM":
+        # LightGBM trains one model per ticker
         for t in tickers:
             _train_lightgbm(args, t, ma_targets)
     else:
+        # neural models support pooled multi-ticker training
         _train_pytorch(args, tickers, model_name, ma_targets)
 
 
 def _train_lightgbm(args, ticker: str, ma_targets: List[str]):
+    """Fit a LightGBM forecaster for one ticker and save checkpoint."""
     from models.LightGBMForecaster import LightGBMForecaster
     from train import _load_raw_df
 
@@ -125,6 +133,7 @@ def _train_lightgbm(args, ticker: str, ma_targets: List[str]):
 
 
 def _train_pytorch(args, tickers: List[str], model_name: str, ma_targets: List[str]):
+    """Delegate PyTorch training to train.main() via sys.argv rewrite."""
     sys.argv = [
         "train.py",
         "--model", model_name,
@@ -147,6 +156,7 @@ def _train_pytorch(args, tickers: List[str], model_name: str, ma_targets: List[s
 
 
 def cmd_test(args):
+    """Evaluate a trained model on the test split and save .npy predictions."""
     import numpy as np
     from utils import calculate_metrics, calculate_return_metrics
 
@@ -222,6 +232,7 @@ def cmd_test(args):
 
 
 def _test_lightgbm(args, ticker: str, ma_targets: List[str]):
+    """Load saved LightGBM forecaster and predict on the test window."""
     from models.LightGBMForecaster import LightGBMForecaster
     from train import _load_raw_df
 
@@ -253,6 +264,7 @@ def _test_lightgbm(args, ticker: str, ma_targets: List[str]):
 
 def _test_pytorch(args, ticker: str, model_name: str, ma_targets: List[str],
                    checkpoint_override: str | None = None):
+    """Load saved PyTorch model and evaluate on one ticker's test split."""
     import torch
     from torch.utils.data import DataLoader
     from dataset import ParquetDataset
@@ -291,6 +303,7 @@ def _test_pytorch(args, ticker: str, model_name: str, ma_targets: List[str],
 
 
 def cmd_meta_label(args):
+    """Generate triple-barrier meta-labels from primary model predictions."""
     sys.argv = [
         "generate_meta_labels.py",
         "--ticker", args.ticker,
@@ -306,6 +319,7 @@ def cmd_meta_label(args):
 
 
 def cmd_train_meta(args):
+    """Train the LightGBM meta-classifier with Purged K-Fold CV."""
     sys.argv = [
         "train_meta.py",
         "--ticker", args.ticker,
@@ -316,6 +330,7 @@ def cmd_train_meta(args):
 
 
 def cmd_evaluate(args):
+    """Report precision/recall/F1/PSR before vs after meta-filtering."""
     from trading_logic.evaluation import full_evaluation, print_evaluation_report
     ticker = args.ticker
 

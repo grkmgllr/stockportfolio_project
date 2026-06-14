@@ -15,16 +15,19 @@ from typing import Dict, List, Optional, Literal
 
 class ParquetDataset(Dataset):
     """
-    Dataset for Parquet stock data.
-    
-    Predicts High and Close prices (and optionally moving averages) from
-    OHLCV input for short-term forecasting.
-    Uses date-based splits for proper time series handling.
-    
-    Input features: Open, High, Low, Close, Volume (5 features)
-                    + Vwap, Transactions (7 features, when available)
-    Output targets: High, Close (2 features)
-                    + EMA_20, SMA_50 (4 features, when ma_targets enabled)
+    Sliding-window dataset for stock price forecasting.
+
+    Reads a CSV per ticker, splits train/val/test by time (no shuffle),
+    fits scalers on train only, and yields (seq_x, seq_y) windows.
+
+    Two output modes:
+      - return_targets=False: targets are standard-scaled absolute prices.
+      - return_targets=True:  targets are % returns relative to the last
+                              Close in the input window ("anchor").
+
+    Shapes:
+        seq_x: [seq_len, n_input_features]
+        seq_y: [pred_len, n_target_features]
     """
     
     OHLCV_COLUMNS = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -203,23 +206,23 @@ class ParquetDataset(Dataset):
         # Extract target features (High, Close + optional MAs)
         df_target = df_raw[self.target_features].copy()
         
-        # Calculate split boundaries
+        # time-ordered split boundaries
         total_len = len(df_input)
         train_end = int(total_len * self.train_ratio)
         val_end = int(total_len * (self.train_ratio + self.val_ratio))
-        
+
         border1s = [0, train_end, val_end]
         border2s = [train_end, val_end, total_len]
-        
+
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
-        
-        # Raw close prices (unscaled) for return-based targets
+
+        # unscaled Close for return-targets mode and inverse transforms
         close_col_idx = self.input_features.index('Close')
         self.raw_close = df_input.iloc[border1:border2, close_col_idx].values.astype(np.float64)
 
         if self.scale:
-            # Fit scalers ONLY on training data
+            # fit scaler on train split only to avoid future data leakage
             train_x = df_input.iloc[border1s[0]:border2s[0]].values
             self.scaler_x.fit(train_x)
             data_x = self.scaler_x.transform(df_input.values)
@@ -247,23 +250,20 @@ class ParquetDataset(Dataset):
     
     def __getitem__(self, index):
         """
-        Get a single sample.
+        Get a single sample: seq_x [seq_len, enc_in], seq_y [pred_len, c_out].
 
-        Returns:
-            seq_x: Input sequence [seq_len, n_input_features]
-            seq_y: Target sequence [pred_len, n_target_features]
-                   When return_targets=True, targets are percentage returns
-                   relative to the anchor Close price.
+        When return_targets=True, seq_y is % returns relative to anchor Close.
         """
         s_begin = index
-        s_end = s_begin + self.seq_len
-        r_begin = s_end
+        s_end = s_begin + self.seq_len       # input window end
+        r_begin = s_end                      # target window start (no overlap)
         r_end = r_begin + self.pred_len
 
         seq_x = self.data_x[s_begin:s_end]
         seq_y = self.data_y[r_begin:r_end]
 
         if self.return_targets:
+            # anchor = last Close price in the input window
             anchor = self.raw_close[s_end - 1]
             seq_y = (seq_y - anchor) / anchor
 

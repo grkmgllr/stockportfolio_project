@@ -123,6 +123,7 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int,
             return_targets=return_targets,
         )
     elif model_name == "TimeMixer":
+        # downsampling layers halve seq_len; ensure smallest scale > kernel
         n_layers = 1 if seq_len % 4 != 0 else 2
         min_scale = seq_len // (2 ** n_layers)
         ma_kernel = min(25, min_scale - 2)
@@ -186,34 +187,32 @@ def print_config(train_cfg: TrainingConfig, model_cfg,
 
 
 def train_epoch(model, train_loader, criterion, optimizer, device, grad_clip):
-    """Run one training epoch."""
+    """Run one training epoch. Returns mean loss."""
     model.train()
     train_loss = []
-    
+
     for batch_x, batch_y in train_loader:
         batch_x = batch_x.to(device)
         batch_y = batch_y.to(device)
-        
+
         optimizer.zero_grad()
-        
-        # Forward pass
+
+        # second arg is time-features (unused by our models)
         outputs = model(batch_x, None)
-        
-        # outputs: [B, pred_len, c_out] - already correct shape
-        loss = criterion(outputs, batch_y)
+
+        loss = criterion(outputs, batch_y)    # [B, pred_len, c_out]
         train_loss.append(loss.item())
-        
-        # Backward pass
+
         loss.backward()
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
         optimizer.step()
-    
+
     return np.average(train_loss)
 
 
 def validate_epoch(model, val_loader, criterion, device):
-    """Run validation epoch."""
+    """Run one validation pass (no grad). Returns mean val loss."""
     model.eval()
     val_loss = []
     
@@ -388,6 +387,7 @@ def train_lightgbm(args):
 
 
 def main():
+    """Parse args and run training (LightGBM or PyTorch branch)."""
     args = parse_args()
 
     # ── LightGBM branch (no PyTorch) ──
@@ -450,7 +450,7 @@ def main():
             return_targets=True,
         ))
 
-    # Use ConcatDataset for pooled multi-ticker training
+    # pool tickers via ConcatDataset for multi-ticker training
     if len(tickers) > 1:
         train_dataset = ConcatDataset(train_datasets)
         val_dataset = ConcatDataset(val_datasets)
@@ -458,7 +458,7 @@ def main():
         train_dataset = train_datasets[0]
         val_dataset = val_datasets[0]
 
-    # Use first ticker's dataset for metadata (all share same features)
+    # all tickers share same features, so first dataset gives metadata
     ref_dataset = train_datasets[0]
 
     model_cfg = get_model_config(

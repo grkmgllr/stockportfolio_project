@@ -128,12 +128,8 @@ def evaluate(model, test_loader, criterion, device, dataset):
     """
     Evaluate model on test set.
 
-    Returns predictions and ground truth in original price scale, with
-    per-target metrics keyed by the target feature name.
-
-    When the dataset uses return_targets, model outputs are percentage
-    returns which are converted back to absolute prices via the anchor
-    Close price before computing metrics.
+    Returns (results_dict, preds, trues) where preds/trues are in
+    original dollar-price scale [N, pred_len, n_targets].
     """
     model.eval()
 
@@ -161,11 +157,13 @@ def evaluate(model, test_loader, criterion, device, dataset):
     n_samples, pred_len, n_features = all_preds.shape
 
     if dataset.return_targets:
+        # convert % returns back to absolute prices: price = anchor * (1 + return)
         anchors = dataset.get_anchors()  # [N]
-        a = anchors[:, None, None]       # [N, 1, 1] for broadcasting
+        a = anchors[:, None, None]       # broadcast to [N, pred_len, n_targets]
         preds_original = a * (1.0 + all_preds)
         trues_original = a * (1.0 + all_trues)
     else:
+        # inverse StandardScaler to get dollar prices
         preds_flat = all_preds.reshape(-1, n_features)
         trues_flat = all_trues.reshape(-1, n_features)
         preds_original = dataset.inverse_transform_y(preds_flat).reshape(n_samples, pred_len, n_features)
