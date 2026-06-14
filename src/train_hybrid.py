@@ -1,16 +1,6 @@
-"""
-Training and evaluation script for the HybridTimeMixerLGBM model.
-
-Runs the full hybrid pipeline per ticker: TimeMixer training, feature
-extraction, LightGBM regression + direction classification, calibration
-on validation data, baseline comparison (persistence / drift / momentum),
-and final blend selection with guardrails.
-
-Usage:
-    python src/train_hybrid.py --tickers AAPL MSFT --epochs 30
-    python src/train_hybrid.py --verbose --use_final_safe_selection
-"""
 import os, sys
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+os.environ['OMP_NUM_THREADS'] = '1'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import random
@@ -29,7 +19,12 @@ from models.HybridModel.HybridModel import HybridTimeMixerLGBM
 from models.TimeMixer.TimeMixer import TimeMixerConfig
 
 def set_seed(seed: int) -> None:
-    """Set all random seeds for reproducibility."""
+    """
+    Set the random seed for all pseudo-random number generators to ensure reproducibility.
+
+    Args:
+        seed (int): The integer seed value to set across Python, NumPy, and PyTorch.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -39,15 +34,48 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 def mape(y_true, y_pred):
-    """Mean Absolute Percentage Error (%)."""
+    """
+    Calculate the Mean Absolute Percentage Error (MAPE).
+
+    Args:
+        y_true (np.ndarray): The ground truth values.
+        y_pred (np.ndarray): The predicted values.
+
+    Returns:
+        float: The MAPE expressed as a percentage.
+    """
     return np.mean(np.abs((y_true - y_pred) / (np.abs(y_true) + 1e-8))) * 100
 
 def smape(y_true, y_pred):
-    """Symmetric Mean Absolute Percentage Error (%)."""
+    """
+    Calculate the Symmetric Mean Absolute Percentage Error (sMAPE).
+
+    Args:
+        y_true (np.ndarray): The ground truth values.
+        y_pred (np.ndarray): The predicted values.
+
+    Returns:
+        float: The sMAPE expressed as a percentage.
+    """
     return np.mean(2.0 * np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8)) * 100
 
 def get_multistep_continuous_labels(data_loader, close_idx_x, close_idx_y, dataset):
-    """Compute % return labels for each horizon step: (future_close - current_close) / current_close."""
+    """
+    Extract multi-step continuous percentage return labels from the data loader.
+
+    This function computes the future returns relative to the most recent 'Close' price 
+    in the historical sequence. The returns are calculated on the un-normalized (raw) scale 
+    to represent true financial returns.
+
+    Args:
+        data_loader (torch.utils.data.DataLoader): The DataLoader providing batches of (X, Y).
+        close_idx_x (int): The index of the 'Close' feature in the input X tensor.
+        close_idx_y (int): The index of the 'Close' feature in the target Y tensor.
+        dataset (Any): The dataset object containing `inverse_transform_x` and `inverse_transform_y`.
+
+    Returns:
+        np.ndarray: A 2D array of shape (N, pred_len) containing the multi-step returns.
+    """
     labels = []
     for batch_x, batch_y in data_loader:
         B, S, C_in = batch_x.shape
@@ -61,7 +89,17 @@ def get_multistep_continuous_labels(data_loader, close_idx_x, close_idx_y, datas
     return np.concatenate(labels, axis=0)
 
 def get_current_close(data_loader, close_idx_x, dataset):
-    """Extract the last Close price in each input window (the prediction anchor)."""
+    """
+    Extract the most recent un-normalized 'Close' price for each sequence in the data loader.
+
+    Args:
+        data_loader (torch.utils.data.DataLoader): The DataLoader to iterate through.
+        close_idx_x (int): The index of the 'Close' feature in the input X tensor.
+        dataset (Any): The dataset object to inversely transform the data.
+
+    Returns:
+        np.ndarray: A 1D array of shape (N,) containing the current close prices.
+    """
     current_closes = []
     for batch_x, _ in data_loader:
         B, S, C_in = batch_x.shape
@@ -70,7 +108,17 @@ def get_current_close(data_loader, close_idx_x, dataset):
     return np.concatenate(current_closes)
 
 def get_actual_future_closes(data_loader, close_idx_y, dataset):
-    """Extract actual future Close prices from the target windows."""
+    """
+    Extract the actual un-normalized future 'Close' prices from the target labels.
+
+    Args:
+        data_loader (torch.utils.data.DataLoader): The DataLoader containing target sequences.
+        close_idx_y (int): The index of the 'Close' feature in the target Y tensor.
+        dataset (Any): The dataset object to inversely transform the targets.
+
+    Returns:
+        np.ndarray: A 2D array of shape (N, pred_len) containing actual future prices.
+    """
     future_closes = []
     for _, batch_y in data_loader:
         _, P, C_out = batch_y.shape
@@ -79,7 +127,19 @@ def get_actual_future_closes(data_loader, close_idx_y, dataset):
     return np.concatenate(future_closes, axis=0)
 
 def get_past_5_day_returns(data_loader, close_idx_x, dataset):
-    """Compute trailing 5-day return for momentum baseline."""
+    """
+    Calculate the past 5-day continuous return for each sample in the data loader.
+
+    Used primarily to establish a simple momentum baseline.
+
+    Args:
+        data_loader (torch.utils.data.DataLoader): The DataLoader.
+        close_idx_x (int): The index of the 'Close' feature in the input.
+        dataset (Any): The dataset for inverse transformations.
+
+    Returns:
+        np.ndarray: A 1D array of shape (N,) containing the 5-day backward returns.
+    """
     past_returns = []
     for batch_x, _ in data_loader:
         B, S, C_in = batch_x.shape
@@ -89,7 +149,17 @@ def get_past_5_day_returns(data_loader, close_idx_x, dataset):
     return np.concatenate(past_returns)
 
 def check_scalers(train_dataset, val_dataset, test_dataset, verbose=False):
-    """Verify all splits use the same scaler params (data leakage check)."""
+    """
+    Diagnostic tool to verify the consistency of data scalers across data splits.
+
+    Detects data leakage (scalers fitted on val/test) or distribution shift issues.
+    
+    Args:
+        train_dataset (Any): The training dataset.
+        val_dataset (Any): The validation dataset.
+        test_dataset (Any): The test dataset.
+        verbose (bool): If True, prints detailed scaler diagnostics.
+    """
     if not verbose:
         return
     print("\n--- Diagnostic: Scaler Information ---")
@@ -116,7 +186,21 @@ def check_scalers(train_dataset, val_dataset, test_dataset, verbose=False):
         print("WARNING: Scaler lacks mean_ attribute, might not be fitted yet.")
 
 def check_label_alignment(test_loader, close_idx_x, close_idx_y, dataset, y_test, test_current_close, verbose=False):
-    """Sanity check: verify that anchor * (1 + return) reconstructs actual future Close."""
+    """
+    Verify that the dynamically constructed percentage returns exactly align with raw price labels.
+
+    This ensures that reconstructing prices using `Current_Close * (1 + Return)` perfectly 
+    matches the actual ground-truth future prices.
+
+    Args:
+        test_loader (torch.utils.data.DataLoader): Test DataLoader.
+        close_idx_x (int): Index of Close feature in X.
+        close_idx_y (int): Index of Close feature in Y.
+        dataset (Any): Dataset object for inverse transforms.
+        y_test (np.ndarray): The extracted return labels.
+        test_current_close (np.ndarray): The extracted current close prices.
+        verbose (bool): Whether to print diagnostics.
+    """
     actual_future_closes = get_actual_future_closes(test_loader, close_idx_y, dataset)
     reconstructed_prices = test_current_close[:, None] * (1 + y_test)
     
@@ -137,9 +221,27 @@ def check_label_alignment(test_loader, close_idx_x, close_idx_y, dataset, y_test
             print(f"  Reconstructed: {reconstructed_prices[i]}")
 
 def build_baseline_predictions(test_current_close, train_returns, past_5_day_returns, pred_len):
-    """Build three naive baselines: persistence (flat), drift (avg train return), momentum (recent trend)."""
+    """
+    Construct naive baseline predictions for comparative model evaluation.
+
+    Generates price and return forecasts for three naive models:
+    - Persistence (Random Walk): Predicts future price will remain exactly the current price.
+    - Drift: Predicts future price will grow at the historical average training return.
+    - Momentum: Predicts future price will grow at the recent 5-day average return.
+
+    Args:
+        test_current_close (np.ndarray): Array of current prices (N,).
+        train_returns (np.ndarray): Array of historical 1-day returns from the training set.
+        past_5_day_returns (np.ndarray): Array of recent 5-day returns corresponding to the test set (N,).
+        pred_len (int): The number of future days to forecast.
+
+    Returns:
+        Tuple of 6 arrays (each shape N x pred_len):
+            - persistence_prices, drift_prices, momentum_prices
+            - persistence_returns, drift_returns, momentum_returns
+    """
     N = len(test_current_close)
-    # Persistence: predict price stays the same
+    # Persistence
     persistence_prices = np.tile(test_current_close[:, None], (1, pred_len))
     persistence_returns = np.zeros_like(persistence_prices) # 0 return
     
@@ -162,7 +264,23 @@ def build_baseline_predictions(test_current_close, train_returns, past_5_day_ret
     return persistence_prices, drift_prices, momentum_prices, persistence_returns, drift_returns, momentum_returns
 
 def evaluate_price_forecasts(actual_prices, pred_prices, actual_returns, pred_returns, pred_len, prefix):
-    """Compute MAE/RMSE/MAPE/sMAPE overall + per-day directional accuracy and correlation."""
+    """
+    Evaluate regression and classification metrics for multi-step price forecasts.
+
+    Calculates overall MAE, RMSE, MAPE, and sMAPE. Then calculates horizon-specific 
+    metrics including directional accuracy, mean returns, and correlation.
+
+    Args:
+        actual_prices (np.ndarray): Actual price values (N, pred_len).
+        pred_prices (np.ndarray): Predicted price values (N, pred_len).
+        actual_returns (np.ndarray): Actual return values (N, pred_len).
+        pred_returns (np.ndarray): Predicted return values (N, pred_len).
+        pred_len (int): The forecast horizon length.
+        prefix (str): Prefix to use for the output dictionary keys (e.g., 'Hybrid_Raw').
+
+    Returns:
+        dict: A dictionary containing all computed evaluation metrics.
+    """
     metrics = {}
     metrics[f'{prefix}_MAE'] = mean_absolute_error(actual_prices, pred_prices)
     metrics[f'{prefix}_RMSE'] = np.sqrt(mean_squared_error(actual_prices, pred_prices))
@@ -197,7 +315,22 @@ def evaluate_price_forecasts(actual_prices, pred_prices, actual_returns, pred_re
     return metrics
 
 def calibrate_returns_on_validation(y_val, val_preds_return, ticker_dir):
-    """Per-horizon calibration: tries bias correction, shrinkage, and both, picks lowest val MAE."""
+    """
+    Calibrate continuous return predictions using validation set performance.
+
+    Searches over different calibration strategies (bias correction, shrinkage, 
+    and both) for each forecast horizon. The best strategy is selected based on 
+    validation MAE, provided it does not cause predictions to collapse into a 
+    single direction unconditionally.
+
+    Args:
+        y_val (np.ndarray): Ground truth returns for the validation set.
+        val_preds_return (np.ndarray): Raw predicted returns for the validation set.
+        ticker_dir (str): Directory to save the calibration parameter report.
+
+    Returns:
+        list of dict: Calibration parameters selected for each forecasting horizon.
+    """
     pred_len = y_val.shape[1]
     params_list = []
     alphas = np.linspace(0.0, 1.0, 11)
@@ -311,7 +444,17 @@ def calibrate_returns_on_validation(y_val, val_preds_return, ticker_dir):
     return params_list
 
 def apply_calibration(preds_return_raw, calibration_params):
-    """Apply per-horizon bias/shrinkage calibration chosen on validation."""
+    """
+    Apply pre-computed calibration parameters to raw return predictions.
+
+    Args:
+        preds_return_raw (np.ndarray): The raw predicted returns (N, pred_len).
+        calibration_params (list of dict): The calibration parameters determined by 
+            `calibrate_returns_on_validation`.
+
+    Returns:
+        np.ndarray: Calibrated predicted returns of the same shape.
+    """
     calibrated = np.zeros_like(preds_return_raw)
     for i, params in enumerate(calibration_params):
         if params['method'] == 'RAW_NO_CALIBRATION':
@@ -325,7 +468,21 @@ def apply_calibration(preds_return_raw, calibration_params):
     return calibrated
 
 def select_direction_thresholds_on_validation(y_val, val_direction_proba, ticker_dir):
-    """Pick best direction-classifier threshold per horizon by balanced accuracy on val."""
+    """
+    Select optimal probability thresholds for the directional classifier.
+
+    Iterates through a set of candidate thresholds for each horizon, evaluating 
+    them on the validation set using balanced accuracy. Selects the threshold 
+    that maximizes balanced accuracy.
+
+    Args:
+        y_val (np.ndarray): Validation set ground truth returns.
+        val_direction_proba (np.ndarray): Validation set predicted probabilities for 'Up'.
+        ticker_dir (str): Directory to save the threshold search report.
+
+    Returns:
+        list of dict: Contains the optimal threshold and associated metrics for each horizon.
+    """
     pred_len = y_val.shape[1]
     thresholds_to_search = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65]
     results = []
@@ -371,7 +528,28 @@ def select_direction_thresholds_on_validation(y_val, val_direction_proba, ticker
     return results
 
 def plot_diagnostics(ticker, out_dir, actual_prices, hybrid_prices_raw, hybrid_prices_calibrated, persistence_prices, actual_returns, hybrid_returns_raw, hybrid_returns_calibrated, pred_len, hybrid_prices_dir_gated=None, pred_prices_final_selected=None):
-    """Save diagnostic plots: price forecasts, raw-vs-calibrated scatter, confusion matrix."""
+    """
+    Generate and save diagnostic plots comparing forecasts to actuals and baselines.
+
+    Generates:
+        1. A time-series line plot of final day price forecasts.
+        2. A scatter plot comparing raw vs calibrated returns.
+        3. A confusion matrix heatmap for directional accuracy.
+
+    Args:
+        ticker (str): The stock ticker symbol.
+        out_dir (str): The output directory for the plots.
+        actual_prices (np.ndarray): True prices.
+        hybrid_prices_raw (np.ndarray): Raw hybrid model price forecasts.
+        hybrid_prices_calibrated (np.ndarray): Calibrated hybrid model price forecasts.
+        persistence_prices (np.ndarray): Baseline persistence price forecasts.
+        actual_returns (np.ndarray): True returns.
+        hybrid_returns_raw (np.ndarray): Raw hybrid model return forecasts.
+        hybrid_returns_calibrated (np.ndarray): Calibrated return forecasts.
+        pred_len (int): Forecast horizon.
+        hybrid_prices_dir_gated (Optional[np.ndarray]): Direction-gated price forecasts.
+        pred_prices_final_selected (Optional[np.ndarray]): Final selected blended price forecasts.
+    """
     plot_dir = os.path.join(out_dir, 'plots')
     os.makedirs(plot_dir, exist_ok=True)
     
@@ -413,7 +591,14 @@ def plot_diagnostics(ticker, out_dir, actual_prices, hybrid_prices_raw, hybrid_p
     plt.close()
 
 def save_diagnostics(metrics, out_dir, ticker):
-    """Save metrics as summary CSV and per-horizon CSV."""
+    """
+    Save the evaluation metrics dictionary into summary CSV files.
+
+    Args:
+        metrics (dict): The dictionary containing evaluation metrics.
+        out_dir (str): Directory where the CSVs will be saved.
+        ticker (str): The stock ticker being evaluated.
+    """
     # Summary CSV
     df = pd.DataFrame([metrics])
     df.to_csv(os.path.join(out_dir, 'metrics_summary.csv'), index=False)
@@ -436,7 +621,28 @@ def save_diagnostics(metrics, out_dir, ticker):
     pd.DataFrame(horizon_data).to_csv(os.path.join(out_dir, 'per_horizon_metrics.csv'), index=False)
 
 def select_final_blend_on_validation(y_val, val_current_close, candidate_return_predictions, pred_len, ticker_dir, min_improvement_pct=1.0, min_blocks_beating_baseline=2, worst_block_tolerance_pct=-2.0):
-    """Per-horizon blend selection: picks best alpha between hybrid and baselines with guardrails."""
+    """
+    Select the optimal ensemble blend between hybrid predictions and simple baselines.
+
+    To ensure stability and robustness against market regime changes, this function splits 
+    the validation data into 3 sequential blocks. It evaluates pure models and various 
+    alpha-blends between the hybrid model and baselines (Persistence, Drift). 
+    A candidate is selected only if it passes strict guardrails (MAE improvement, 
+    directional accuracy, and block-wise stability).
+
+    Args:
+        y_val (np.ndarray): Validation ground truth returns.
+        val_current_close (np.ndarray): Current close prices for validation set.
+        candidate_return_predictions (dict): Dictionary mapping model names to return prediction arrays.
+        pred_len (int): Forecast horizon length.
+        ticker_dir (str): Output directory for selection reports.
+        min_improvement_pct (float): Required overall MAE improvement over the best baseline.
+        min_blocks_beating_baseline (int): How many validation blocks must beat the baseline.
+        worst_block_tolerance_pct (float): Maximum acceptable underperformance in any block.
+
+    Returns:
+        list of dict: The final blend configuration chosen for each horizon.
+    """
     alphas = np.linspace(0.0, 1.0, 11)
     all_candidates_results = []
     selected_variants_results = []
@@ -613,7 +819,25 @@ def select_final_blend_on_validation(y_val, val_current_close, candidate_return_
     return selected_variants_results
 
 def select_final_safe_on_validation(y_val, val_current_close, candidate_return_predictions, pred_len, ticker_dir, min_improvement_pct=3.0, required_blocks=3):
-    """Conservative blend selection: requires higher MAE improvement and all blocks beating baseline."""
+    """
+    Select an extremely conservative model or blend.
+
+    Similar to `select_final_blend_on_validation`, but enforces stricter guardrails 
+    (e.g., must beat the baseline in ALL validation blocks) before choosing a 
+    hybrid-based forecast over a naive baseline.
+
+    Args:
+        y_val (np.ndarray): Validation ground truth returns.
+        val_current_close (np.ndarray): Current close prices for validation set.
+        candidate_return_predictions (dict): Return predictions for models.
+        pred_len (int): Forecast horizon length.
+        ticker_dir (str): Output directory.
+        min_improvement_pct (float): Stricter MAE improvement threshold.
+        required_blocks (int): Stricter block beating requirement (usually all 3 blocks).
+
+    Returns:
+        list of dict: The selected safe blend configuration.
+    """
     alphas = np.linspace(0.0, 1.0, 11)
     selected_variants_results = []
     
@@ -742,7 +966,21 @@ def select_final_safe_on_validation(y_val, val_current_close, candidate_return_p
 
 
 def run_single_ticker(args, ticker):
-    """Full hybrid pipeline for one ticker: train, calibrate, evaluate, save results."""
+    """
+    Execute the entire hybrid pipeline for a single stock ticker.
+
+    This encompasses data loading, model initialization, training, calibration, 
+    threshold selection, blending, test evaluation, and report/plot generation.
+
+    Args:
+        args (argparse.Namespace): The parsed command line arguments.
+        ticker (str): The specific stock ticker symbol to process.
+
+    Returns:
+        Tuple[dict, dict]: 
+            - A summary dictionary of key performance metrics for the ticker.
+            - A dictionary containing actual and predicted arrays for advanced analysis.
+    """
     print(f"\n{'=' * 60}")
     print(f"  STARTING DIAGNOSTICS FOR {ticker}")
     print(f"{'=' * 60}")
@@ -1129,7 +1367,25 @@ def run_single_ticker(args, ticker):
     return summary_dict, prediction_arrays
 
 def run_all_tickers(args):
-    """Loop over all tickers, collect summaries, compute cross-sectional IC/RIC."""
+    """
+    Execute the hybrid pipeline across multiple stock tickers and generate a cross-sectional report.
+
+    This function loops over all specified tickers, running the full training and 
+    evaluation pipeline for each one. After processing all tickers, it aggregates 
+    the results into a single comprehensive summary.
+
+    Furthermore, if at least 3 tickers are provided, it performs a cross-sectional 
+    evaluation, calculating the Information Coefficient (IC) and Rank Information 
+    Coefficient (RIC) across the asset universe for each forecast horizon. This is 
+    crucial for assessing the model's ability to rank assets for portfolio construction.
+
+    Args:
+        args (argparse.Namespace): The parsed command line arguments containing 
+            hyperparameters, paths, and the list of tickers.
+            
+    Returns:
+        None
+    """
     set_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
     

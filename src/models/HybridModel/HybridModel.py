@@ -12,17 +12,36 @@ from models.TimeMixer.TimeMixer import TimeMixer, TimeMixerConfig
 
 class HybridTimeMixerLGBM:
     """
-    Hybrid model: TimeMixer (deep learning) + LightGBM (gradient boosting).
+    End-to-End Hybrid Model combining TimeMixer and LightGBM for time-series forecasting.
 
-    Pipeline:
-        Phase 1: Train TimeMixer on raw OHLCV sequences (regression).
-        Phase 2: Extract features — latent embeddings + predictions + statistical.
-        Phase 3: Train per-horizon LightGBM regressors + optional direction classifiers.
+    This class implements a hybrid forecasting approach that leverages both the representation
+    learning capabilities of deep neural networks (TimeMixer) and the robust classification/regression 
+    capabilities of gradient boosting machines (LightGBM).
 
-    Feature groups fed to LightGBM:
-        - Latent:      TimeMixer penultimate-layer embeddings
-        - Prediction:  mean/last/std/slope of TimeMixer's forecast horizon
-        - Statistical: hand-crafted technical indicators from raw sequences
+    Key concepts of the Hybrid Model Architecture:
+
+    (1) Deep Latent Representation (TimeMixer):
+        The model first trains a TimeMixer network, which is designed to capture complex, 
+        multi-scale temporal dependencies in the input series. By extracting the penultimate
+        layer embeddings (latent features), we obtain a dense, non-linear representation of
+        the historical context.
+
+    (2) Statistical and Technical Feature Engineering:
+        To complement the deep embeddings, a rich set of hand-crafted statistical and
+        technical indicators (e.g., volatility, momentum, RSI, range) are computed directly
+        from the raw input sequences. This ensures that explicit market dynamics are not lost.
+
+    (3) Gradient Boosting Machine (LightGBM):
+        The extracted deep latent features, the actual TimeMixer predictions, and the 
+        hand-crafted statistical features are concatenated into a unified feature space. 
+        A series of LightGBM models (one for each forecast horizon) are then trained on this 
+        feature space to produce the final calibrated return forecasts. Additionally, LightGBM 
+        classifiers can be trained to predict the direction of the return (up/down).
+
+    References
+    ----------
+    [1] Wang, H. et al. (2024). TimeMixer: Decomposable Multiscale Mixing for Time Series Forecasting. ICLR.
+    [2] Ke, G. et al. (2017). LightGBM: A Highly Efficient Gradient Boosting Decision Tree. NeurIPS.
     """
 
     def __init__(self, timemixer_config: TimeMixerConfig, lgbm_params: Optional[dict] = None) -> None:
@@ -30,10 +49,15 @@ class HybridTimeMixerLGBM:
         Initialize the HybridTimeMixerLGBM model.
 
         Args:
-            timemixer_config (TimeMixerConfig):
-                Configuration object for the underlying TimeMixer model.
-            lgbm_params (dict, optional):
-                Parameters for the LightGBM model.
+            timemixer_config (TimeMixerConfig): 
+                Configuration object containing hyperparameters for the underlying TimeMixer model
+                (e.g., sequence length, prediction length, embedding dimension).
+            lgbm_params (Optional[dict]): 
+                Dictionary of hyperparameters for the LightGBM models. If None, default 
+                regression parameters are used.
+                
+        Returns:
+            None
         """
         self.device = torch.device(
             "cuda" if torch.cuda.is_available()
@@ -77,18 +101,28 @@ class HybridTimeMixerLGBM:
         """
         Phase 1: Train the TimeMixer model using PyTorch.
 
-        Saves the best model weights based on validation loss (if provided)
-        or training loss.
+        This phase focuses on training the deep learning component (TimeMixer) 
+        as a standalone regression model to forecast future values based on historical sequences. 
+        The primary goal here is to optimize the network's weights so that its internal 
+        latent representations capture meaningful temporal dynamics. 
+        
+        The best model weights, evaluated based on validation loss (if `val_loader` is provided) 
+        or training loss, are saved and restored at the end of the training process.
 
         Args:
             train_loader (torch.utils.data.DataLoader):
                 DataLoader containing the training data batches.
-            val_loader (torch.utils.data.DataLoader, optional):
-                DataLoader for validation monitoring.
+            val_loader (Optional[torch.utils.data.DataLoader]):
+                DataLoader for validation monitoring to prevent overfitting and select the best model.
             epochs (int):
-                Number of training epochs.
+                Number of training epochs. Default is 10.
             lr (float):
-                Initial learning rate for the Adam optimizer.
+                Initial learning rate for the Adam optimizer. Default is 1e-3.
+            verbose (bool):
+                If True, prints detailed training progress. Default is False.
+                
+        Returns:
+            None
         """
         if verbose:
             print("\n>>> Phase 1: Training TimeMixer (Deep Learning)...")
@@ -170,7 +204,21 @@ class HybridTimeMixerLGBM:
     # ------------------------------------------------------------------
 
     def extract_latent_features(self, data_loader: torch.utils.data.DataLoader) -> np.ndarray:
-        """Extract latent embeddings from TimeMixer's last PDM block output."""
+        """
+        Extract deep latent embeddings from TimeMixer's penultimate layer.
+        
+        By passing the input sequences through the trained TimeMixer model up to the 
+        mixing layers, we obtain a condensed representation of the multi-scale temporal patterns.
+        These embeddings serve as high-level features for the subsequent gradient boosting models.
+
+        Args:
+            data_loader (torch.utils.data.DataLoader): 
+                DataLoader containing the input sequences.
+                
+        Returns:
+            np.ndarray: A 2D array of shape (N, E) containing the latent embeddings, 
+                where N is the number of samples and E is the embedding dimension.
+        """
         self.timemixer.eval()
         embeddings: List[np.ndarray] = []
 
@@ -193,8 +241,19 @@ class HybridTimeMixerLGBM:
         """
         Extract TimeMixer's actual forecast predictions as features.
 
-        For each sample, computes mean, last, std, and slope of the
-        predicted horizon, yielding ``C_out * 4`` features.
+        Instead of only using the latent embeddings, the raw multi-step forecasts 
+        produced by the TimeMixer are also extracted. For each predicted horizon, 
+        we compute summary statistics (mean, last value, standard deviation, and slope) 
+        across the forecast steps. This explicitly informs the LightGBM models of the 
+        deep learning model's direct expectations.
+
+        Args:
+            data_loader (torch.utils.data.DataLoader): 
+                DataLoader containing the input sequences.
+
+        Returns:
+            np.ndarray: A 2D array of shape (N, C_out * 4) containing the prediction 
+                summary features, where N is the number of samples.
         """
         self.timemixer.eval()
         preds_list: List[np.ndarray] = []
@@ -217,14 +276,25 @@ class HybridTimeMixerLGBM:
     @staticmethod
     def compute_statistical_features(data_loader: torch.utils.data.DataLoader) -> np.ndarray:
         """
-        Compute rich statistical and technical features from raw input sequences.
+        Compute rich statistical and technical features from normalized input sequences.
 
-        Per channel (C), computes 16 features:
-            mean, std, min, max, last, first, slope, skewness,
-            return, short_momentum, mid_momentum, volatility,
-            range, up_ratio, rsi, position_in_range.
+        Calculates traditional time-series features and financial indicators per channel.
+        These explicit features often capture characteristics (like bounds, variance, or
+        short-term momentum) that deep networks might smooth out or ignore.
 
-        Total features: ``C * 16``.
+        Features computed per channel include:
+            - Basic stats: mean, std, min, max, last, first, slope, skewness.
+            - Dynamics: return, short-term momentum, mid-term momentum, volatility.
+            - Indicators: range, up_ratio, RSI approximation, position in range.
+
+        Args:
+            data_loader (torch.utils.data.DataLoader): 
+                DataLoader containing normalized input sequences.
+
+        Returns:
+            np.ndarray: A 2D array of shape (N, C * 16) containing the computed 
+                statistical features, where N is the total number of samples and C 
+                is the number of input channels.
         """
         eps = 1e-8
         all_features: List[np.ndarray] = []
@@ -283,9 +353,29 @@ class HybridTimeMixerLGBM:
 
         return np.concatenate(all_features, axis=0)
 
-    @staticmethod
     def compute_raw_statistical_features(data_loader: torch.utils.data.DataLoader, dataset, close_idx_x=None):
-        """Compute scale-free technical features from inverse-transformed (raw dollar) prices."""
+        """
+        Compute explicit financial features from unnormalized (raw) price sequences.
+
+        Unlike `compute_statistical_features`, this method inversely transforms the 
+        normalized data back to its original price/volume scale before computing 
+        percentage changes, true volatilities, moving average ratios, and log returns.
+        This provides the LightGBM models with scale-free features that accurately 
+        reflect real-world market movements.
+
+        Args:
+            data_loader (torch.utils.data.DataLoader): 
+                DataLoader containing the batched input data.
+            dataset (Any): 
+                The dataset object containing the `inverse_transform_x` method and feature lists.
+            close_idx_x (Optional[int]): 
+                The index of the 'Close' price feature in the input channels. If None, it is inferred.
+
+        Returns:
+            Tuple[np.ndarray, List[str]]: A tuple containing:
+                - feat_mat (np.ndarray): 2D array of raw statistical features.
+                - feature_names (List[str]): List of the corresponding feature names.
+        """
         eps = 1e-8
         all_features = []
         feature_names = []
@@ -437,7 +527,29 @@ class HybridTimeMixerLGBM:
         return np.concatenate(all_features, axis=0), feature_names
 
     def _build_features(self, data_loader, external_features=None, dataset=None, use_raw_stats=True):
-        """Concatenate latent + prediction + statistical features into one matrix."""
+        """
+        Construct the complete hybrid feature matrix.
+
+        This method coordinates the execution of Phase 2 by calling all feature extraction
+        methods and concatenating their results. The final matrix consists of:
+            1. Latent features from TimeMixer.
+            2. Prediction summary features from TimeMixer.
+            3. Statistical/Technical features (either raw or normalized).
+            4. Any external features provided.
+
+        Args:
+            data_loader (torch.utils.data.DataLoader): Target DataLoader.
+            external_features (Optional[np.ndarray]): Additional features to append.
+            dataset (Optional[Any]): Dataset object for un-normalizing data (needed if use_raw_stats=True).
+            use_raw_stats (bool): If True, computes features on raw unnormalized prices.
+
+        Returns:
+            Tuple[np.ndarray, int, int, int]: A tuple containing:
+                - combined (np.ndarray): The concatenated feature matrix.
+                - n_lat (int): Number of latent features.
+                - n_pred (int): Number of prediction features.
+                - n_stat (int): Number of statistical features.
+        """
         f_latent = self.extract_latent_features(data_loader)
         f_pred = self.extract_prediction_features(data_loader)
         
@@ -457,7 +569,7 @@ class HybridTimeMixerLGBM:
         return combined, f_latent.shape[1], f_pred.shape[1], f_stat.shape[1]
 
     def _diagnose_and_save_features(self, feat, y, n_lat, n_pred, n_stat, split_name, output_dir=None, is_raw=True, verbose=False):
-        """Validate feature ranges, log stats, and optionally save to disk."""
+        """Perform diagnostics on built features and save them."""
         n_ext = feat.shape[1] - (n_lat + n_pred + n_stat)
         
         if verbose:
@@ -523,7 +635,35 @@ class HybridTimeMixerLGBM:
         use_regression_variant_search=False,
         verbose=False
     ) -> None:
-        """Train one LightGBM regressor per forecast day on combined features."""
+        """
+        Phase 3: Train LightGBM regressors and classifiers using the combined features.
+
+        For each step in the forecast horizon, a distinct LightGBM regression model is trained 
+        to predict the continuous return. The method also supports searching over different 
+        target transformations (e.g., demean, standardize) and objectives (e.g., Huber loss, L1) 
+        using validation data to select the optimal model formulation.
+
+        Optionally, an independent LightGBM binary classifier is trained for each horizon 
+        to predict the directional movement (Up/Down). This allows for a gated hybrid approach 
+        where the regressor determines magnitude and the classifier determines direction.
+
+        Args:
+            train_loader (torch.utils.data.DataLoader): Training DataLoader.
+            y_labels (np.ndarray): Target labels for the training set (shape: N x pred_len).
+            val_loader (Optional[torch.utils.data.DataLoader]): Validation DataLoader.
+            y_val (Optional[np.ndarray]): Target labels for the validation set.
+            external_features (Optional[np.ndarray]): External features for the training set.
+            output_dir (Optional[str]): Directory to save the extracted features and model metadata.
+            train_dataset (Optional[Any]): Training dataset object.
+            val_dataset (Optional[Any]): Validation dataset object.
+            use_raw_stats (bool): If True, computes raw scale-free statistical features.
+            use_direction_classifier (bool): If True, trains binary classifiers for return direction.
+            use_regression_variant_search (bool): If True, searches multiple regression targets and objectives.
+            verbose (bool): If True, prints progress and evaluation metrics.
+            
+        Returns:
+            None
+        """
         if verbose:
             print("\n>>> Phase 2: Extracting features from TimeMixer...")
         train_feat, n_lat, n_pred, n_stat = self._build_features(train_loader, external_features, dataset=train_dataset, use_raw_stats=use_raw_stats)
@@ -801,7 +941,32 @@ class HybridTimeMixerLGBM:
             external_features=None, tm_epochs=10, output_dir=None,
             train_dataset=None, val_dataset=None, use_raw_stats=True, use_direction_classifier=True,
             use_regression_variant_search=False, verbose=False):
-        """End-to-End training pipeline."""
+        """
+        End-to-End training pipeline executing Phase 1 through Phase 3.
+
+        This method orchestrates the complete training lifecycle:
+        1. Train the deep TimeMixer model on historical sequences (Phase 1).
+        2. Extract latent representations, predictions, and statistical features (Phase 2).
+        3. Train the LightGBM models (regressors and classifiers) on the consolidated features (Phase 3).
+
+        Args:
+            train_loader (torch.utils.data.DataLoader): Training DataLoader.
+            y_labels (np.ndarray): Target labels for the training set.
+            val_loader (Optional[torch.utils.data.DataLoader]): Validation DataLoader.
+            y_val (Optional[np.ndarray]): Target labels for the validation set.
+            external_features (Optional[np.ndarray]): Extra features.
+            tm_epochs (int): Number of epochs to train TimeMixer.
+            output_dir (Optional[str]): Path to save artifacts.
+            train_dataset (Optional[Any]): Training dataset.
+            val_dataset (Optional[Any]): Validation dataset.
+            use_raw_stats (bool): Use raw scale-free statistical features.
+            use_direction_classifier (bool): Train binary directional classifiers.
+            use_regression_variant_search (bool): Perform validation-based target variant search.
+            verbose (bool): Print detailed training progress.
+
+        Returns:
+            None
+        """
         self.fit_timemixer(train_loader, val_loader=val_loader, epochs=tm_epochs, verbose=verbose)
         self.fit_lgbm(train_loader, y_labels, val_loader=val_loader, y_val=y_val,
                       external_features=external_features, output_dir=output_dir,
@@ -812,7 +977,28 @@ class HybridTimeMixerLGBM:
 
     def predict(self, test_loader, external_features=None, output_dir=None, y_test=None,
                 test_dataset=None, use_raw_stats=True, split_name="test", verbose=False) -> np.ndarray:
-        """Run full hybrid pipeline: extract features then predict with LightGBM. Returns [N, pred_len]."""
+        """
+        Generates multi-step predictions using the complete hybrid pipeline.
+
+        Applies the fully trained hybrid pipeline to unseen test data. It extracts the 
+        deep features from the trained TimeMixer, computes the statistical features, 
+        concatenates them, and passes them through the ensemble of horizon-specific 
+        LightGBM regressors to produce continuous predictions.
+
+        Args:
+            test_loader (torch.utils.data.DataLoader): DataLoader containing test data.
+            external_features (Optional[np.ndarray]): Additional features.
+            output_dir (Optional[str]): Directory to save diagnostic extracted features.
+            y_test (Optional[np.ndarray]): Actual test targets (for diagnostics/saving).
+            test_dataset (Optional[Any]): Dataset object for raw stats computation.
+            use_raw_stats (bool): Must match the flag used during `fit`.
+            split_name (str): Label used when saving the diagnostic features array.
+            verbose (bool): If True, prints extraction details.
+
+        Returns:
+            np.ndarray: A 2D array of shape (N, pred_len) containing the continuous 
+                predictions for each forecast horizon.
+        """
         if not self.models:
             raise ValueError("LightGBM models are not trained yet! Call fit() first.")
 
@@ -834,7 +1020,24 @@ class HybridTimeMixerLGBM:
         return np.column_stack(preds)
 
     def predict_direction_proba(self, test_loader, external_features=None, test_dataset=None, use_raw_stats=True, verbose=False) -> np.ndarray:
-        """Predict P(price goes up) per horizon day using the direction classifiers. Returns [N, pred_len]."""
+        """
+        Generates multi-step predictions for directional probabilities.
+
+        Utilizes the trained LightGBM classifiers to output the probability 
+        that the target will move in a positive direction (Up) for each forecast horizon.
+        This is intended to be used in conjunction with `predict()` for direction gating.
+
+        Args:
+            test_loader (torch.utils.data.DataLoader): DataLoader containing test data.
+            external_features (Optional[np.ndarray]): Additional features.
+            test_dataset (Optional[Any]): Dataset object for raw stats computation.
+            use_raw_stats (bool): Must match the flag used during `fit`.
+            verbose (bool): If True, prints extraction details.
+
+        Returns:
+            np.ndarray: A 2D array of shape (N, pred_len) containing probabilities 
+                in the range [0.0, 1.0] indicating the likelihood of an 'Up' movement.
+        """
         if not self.classifiers:
             raise ValueError("LightGBM classifiers are not trained yet! Ensure use_direction_classifier=True during fit.")
             
