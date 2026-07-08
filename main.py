@@ -142,6 +142,7 @@ def _train_pytorch(args, tickers: List[str], model_name: str, ma_targets: List[s
         "--epochs", str(args.epochs),
         "--batch_size", str(args.batch_size),
         "--lr", str(args.lr),
+        "--patience", str(args.patience),
         "--data_root", args.data_root,
     ]
     if len(tickers) > 1:
@@ -219,8 +220,6 @@ def cmd_test(args):
         out_dir = _results_dir(ticker, model_name)
         np.save(os.path.join(out_dir, "predictions.npy"), preds)
         np.save(os.path.join(out_dir, "ground_truth.npy"), trues)
-        np.save(os.path.join(RESULTS_ROOT, f"{ticker}_predictions.npy"), preds)
-        np.save(os.path.join(RESULTS_ROOT, f"{ticker}_ground_truth.npy"), trues)
 
         config = {"ticker": ticker, "model": model_name, "seq_len": args.seq_len, "pred_len": args.pred_len}
         run_file = _save_run_metrics(out_dir, results, config)
@@ -307,6 +306,7 @@ def cmd_meta_label(args):
     sys.argv = [
         "generate_meta_labels.py",
         "--ticker", args.ticker,
+        "--model", args.model,
         "--seq_len", str(args.seq_len),
         "--pred_len", str(args.pred_len),
         "--data_root", args.data_root,
@@ -323,6 +323,7 @@ def cmd_train_meta(args):
     sys.argv = [
         "train_meta.py",
         "--ticker", args.ticker,
+        "--model", args.model,
         "--threshold", str(args.threshold),
     ]
     from train_meta import main as tm_main
@@ -333,11 +334,14 @@ def cmd_evaluate(args):
     """Report precision/recall/F1/PSR before vs after meta-filtering."""
     from trading_logic.evaluation import full_evaluation, print_evaluation_report
     ticker = args.ticker
+    model = args.model
 
-    meta_pred_path = os.path.join(META_ROOT, f"meta_predictions_{ticker}.csv")
+    meta_pred_path = os.path.join(
+        META_ROOT, f"meta_predictions_{ticker}_{model}.csv"
+    )
     if not os.path.exists(meta_pred_path):
         print(f"No meta predictions found at {meta_pred_path}")
-        print(f"Run: python main.py train-meta --ticker {ticker} first.")
+        print(f"Run: python main.py train-meta --ticker {ticker} --model {model} first.")
         return
 
     import pandas as pd
@@ -409,9 +413,11 @@ def build_parser() -> argparse.ArgumentParser:
     # --- train ---
     p_train = subparsers.add_parser("train", help="Train a forecasting model")
     add_common_args(p_train)
-    p_train.add_argument("--epochs", type=int, default=100)
+    p_train.add_argument("--epochs", type=int, default=200)
     p_train.add_argument("--batch_size", type=int, default=32)
-    p_train.add_argument("--lr", type=float, default=3e-4)
+    p_train.add_argument("--lr", type=float, default=2e-4)
+    p_train.add_argument("--patience", type=int, default=30,
+                         help="Early stopping patience (epochs without improvement)")
 
     # --- test ---
     p_test = subparsers.add_parser("test", help="Evaluate a trained model")
@@ -421,6 +427,9 @@ def build_parser() -> argparse.ArgumentParser:
     # --- meta-label ---
     p_meta = subparsers.add_parser("meta-label", help="Generate triple-barrier meta-labels")
     p_meta.add_argument("--ticker", type=str, default="AAPL")
+    p_meta.add_argument("--model", type=str, default="LightGBM",
+                       choices=["LightGBM", "TimesNet", "TimeMixer"],
+                       help="Primary forecaster whose predictions to label")
     p_meta.add_argument("--seq_len", type=int, default=30)
     p_meta.add_argument("--pred_len", type=int, default=5)
     p_meta.add_argument("--data_root", type=str, default=DATA_ROOT)
@@ -429,19 +438,27 @@ def build_parser() -> argparse.ArgumentParser:
     # --- train-meta ---
     p_tmeta = subparsers.add_parser("train-meta", help="Train the meta-classifier")
     p_tmeta.add_argument("--ticker", type=str, default="AAPL")
+    p_tmeta.add_argument("--model", type=str, default="LightGBM",
+                        choices=["LightGBM", "TimesNet", "TimeMixer"],
+                        help="Primary forecaster whose meta-labels to train on")
     p_tmeta.add_argument("--threshold", type=float, default=0.5)
 
     # --- evaluate ---
     p_eval = subparsers.add_parser("evaluate", help="Evaluate meta-labeling precision lift")
     p_eval.add_argument("--ticker", type=str, default="AAPL")
+    p_eval.add_argument("--model", type=str, default="LightGBM",
+                       choices=["LightGBM", "TimesNet", "TimeMixer"],
+                       help="Primary forecaster whose meta-predictions to evaluate")
     p_eval.add_argument("--threshold", type=float, default=0.5)
 
     # --- run-all ---
     p_all = subparsers.add_parser("run-all", help="Run full pipeline (train→test→meta→evaluate)")
     add_common_args(p_all)
-    p_all.add_argument("--epochs", type=int, default=100)
+    p_all.add_argument("--epochs", type=int, default=200)
     p_all.add_argument("--batch_size", type=int, default=32)
-    p_all.add_argument("--lr", type=float, default=3e-4)
+    p_all.add_argument("--lr", type=float, default=2e-4)
+    p_all.add_argument("--patience", type=int, default=30,
+                       help="Early stopping patience (epochs without improvement)")
     p_all.add_argument("--threshold", type=float, default=0.5)
 
     return parser

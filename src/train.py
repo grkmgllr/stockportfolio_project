@@ -71,10 +71,10 @@ class TrainingConfig:
     
     # Training hyperparameters
     batch_size: int = 32
-    epochs: int = 100
-    learning_rate: float = 3e-4   # fix: was 1e-3, too high for 639-sample dataset
+    epochs: int = 200
+    learning_rate: float = 2e-4
     weight_decay: float = 1e-5
-    patience: int = 20            # fix: was 10, models need more time to converge
+    patience: int = 30
     grad_clip: float = 1.0
     scheduler: Literal["cosine", "step", "none"] = "cosine"
     scheduler_step_size: int = 10
@@ -262,11 +262,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pred_len", type=int, default=5, help="Prediction horizon in days (default: 5)")
 
     # Training hyperparameters
-    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=200, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
-    parser.add_argument("--patience", type=int, default=20, help="Early stopping patience")
+    parser.add_argument("--patience", type=int, default=30, help="Early stopping patience")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping")
     parser.add_argument("--scheduler", type=str, default="cosine", choices=["cosine", "step", "none"])
 

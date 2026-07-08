@@ -179,8 +179,9 @@ def compute_rolling_vol(close: pd.Series, period: int = 20) -> pd.Series:
 
 def build_meta_dataset(
     ticker: str,
+    model: str,
     data_root: str = "data/raw",
-    results_dir: str = "results",
+    results_root: str = "results",
     seq_len: int = 14,
     pred_len: int = 5,
     train_ratio: float = 0.7,
@@ -213,10 +214,14 @@ def build_meta_dataset(
     Args:
         ticker (str):
             Stock ticker symbol (e.g. ``'AAPL'``).
+        model (str):
+            Primary forecaster name (``'LightGBM'``, ``'TimesNet'``, or
+            ``'TimeMixer'``).  Predictions are read from
+            ``{results_root}/{ticker}/{model}/``.
         data_root (str):
             Directory containing ``{ticker}.csv`` with OHLCV data.
-        results_dir (str):
-            Directory where ``test.py`` saved the ``.npy`` files.
+        results_root (str):
+            Root of the results tree.  See ``main.py:_results_dir``.
         seq_len (int):
             Look-back window used during training / testing.
         pred_len (int):
@@ -289,13 +294,14 @@ def build_meta_dataset(
     total_len = len(df_raw)
 
     # ── 2. Load predictions ──
-    pred_path = os.path.join(results_dir, f"{ticker}_predictions.npy")
-    true_path = os.path.join(results_dir, f"{ticker}_ground_truth.npy")
+    results_dir = os.path.join(results_root, ticker, model)
+    pred_path = os.path.join(results_dir, "predictions.npy")
+    true_path = os.path.join(results_dir, "ground_truth.npy")
 
     if not os.path.exists(pred_path) or not os.path.exists(true_path):
         raise FileNotFoundError(
             f"Prediction files not found in {results_dir}/.\n"
-            f"Run: python test.py --ticker {ticker} --save_predictions first."
+            f"Run: python main.py test --ticker {ticker} --model {model} first."
         )
 
     preds = np.load(pred_path)   # [N_test, pred_len, n_targets]
@@ -382,8 +388,11 @@ def parse_args() -> argparse.Namespace:
         description="Generate meta-labels and features from primary model predictions."
     )
     parser.add_argument("--ticker", type=str, default="AAPL")
+    parser.add_argument("--model", type=str, default="LightGBM",
+                        choices=["LightGBM", "TimesNet", "TimeMixer"],
+                        help="Primary forecaster whose predictions to read")
     parser.add_argument("--data_root", type=str, default="data/raw")
-    parser.add_argument("--results_dir", type=str, default="results")
+    parser.add_argument("--results_root", type=str, default="results")
     parser.add_argument("--seq_len", type=int, default=30)
     parser.add_argument("--pred_len", type=int, default=5)
     parser.add_argument("--train_ratio", type=float, default=0.7)
@@ -407,6 +416,7 @@ def main():
     target_names = args.target_names or ["High", "Close"]
 
     print(f"Ticker:          {args.ticker}")
+    print(f"Model:           {args.model}")
     print(f"Seq len:         {args.seq_len}")
     print(f"Pred len:        {args.pred_len}")
     print(f"Target names:    {target_names}")
@@ -416,8 +426,9 @@ def main():
 
     df = build_meta_dataset(
         ticker=args.ticker,
+        model=args.model,
         data_root=args.data_root,
-        results_dir=args.results_dir,
+        results_root=args.results_root,
         seq_len=args.seq_len,
         pred_len=args.pred_len,
         train_ratio=args.train_ratio,
@@ -430,7 +441,9 @@ def main():
 
     # ── Save ──
     os.makedirs(args.output_dir, exist_ok=True)
-    out_path = os.path.join(args.output_dir, f"meta_labels_{args.ticker}.csv")
+    out_path = os.path.join(
+        args.output_dir, f"meta_labels_{args.ticker}_{args.model}.csv"
+    )
     df.to_csv(out_path, index=False)
 
     # ── Summary ──

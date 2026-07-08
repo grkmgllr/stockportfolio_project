@@ -63,8 +63,11 @@ def parse_args() -> argparse.Namespace:
         description="Train LightGBM meta-classifier on meta-labeled data."
     )
     parser.add_argument("--ticker", type=str, default="AAPL")
+    parser.add_argument("--model", type=str, default="LightGBM",
+                        choices=["LightGBM", "TimesNet", "TimeMixer"],
+                        help="Primary forecaster whose meta-labels to train on")
     parser.add_argument("--meta_dir", type=str, default="data/meta",
-                        help="Directory containing meta_labels_{ticker}.csv")
+                        help="Directory containing meta_labels_{ticker}_{model}.csv")
     parser.add_argument("--output_dir", type=str, default="checkpoints/meta",
                         help="Directory to save the trained model")
     parser.add_argument("--n_splits", type=int, default=5,
@@ -82,10 +85,13 @@ def main():
     args = parse_args()
 
     # ── 1. Load meta-label CSV ──
-    csv_path = os.path.join(args.meta_dir, f"meta_labels_{args.ticker}.csv")
+    csv_path = os.path.join(
+        args.meta_dir, f"meta_labels_{args.ticker}_{args.model}.csv"
+    )
     if not os.path.exists(csv_path):
         print(f"Error: Meta-label file not found: {csv_path}")
-        print(f"Run: python scripts/generate_meta_labels.py --ticker {args.ticker} first.")
+        print(f"Run: python main.py meta-label --ticker {args.ticker} "
+              f"--model {args.model} first.")
         return
 
     df = pd.read_csv(csv_path)
@@ -148,13 +154,17 @@ def main():
 
     # ── 6. Save ──
     os.makedirs(args.output_dir, exist_ok=True)
-    model_path = os.path.join(args.output_dir, f"{args.ticker}_meta_clf.joblib")
+    model_path = os.path.join(
+        args.output_dir, f"{args.ticker}_{args.model}_meta_clf.joblib"
+    )
     clf.save(model_path)
 
     # Also save the predictions for evaluation in Phase 6
     df["meta_proba"] = proba
     df["meta_pred"] = preds
-    eval_path = os.path.join(args.meta_dir, f"meta_predictions_{args.ticker}.csv")
+    eval_path = os.path.join(
+        args.meta_dir, f"meta_predictions_{args.ticker}_{args.model}.csv"
+    )
     df.to_csv(eval_path, index=False)
     print(f"Predictions saved to {eval_path}")
 

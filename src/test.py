@@ -248,19 +248,15 @@ def print_results(results: dict, target_names: List[str]) -> None:
 
 
 def save_predictions(ticker: str, preds: np.ndarray, trues: np.ndarray,
-                     model_name: str | None = None) -> None:
-    """Save predictions and ground truth as .npy files.
+                     model_name: str) -> None:
+    """Save predictions and ground truth to ``results/{ticker}/{model_name}/``.
 
-    When *model_name* is given, files are saved under ``results/{model_name}/``
-    so that different primary models' outputs don't overwrite each other.
+    This is the single canonical output layout — see main.py:_results_dir.
     """
-    if model_name:
-        output_dir = os.path.join("results", model_name)
-    else:
-        output_dir = "results"
+    output_dir = os.path.join("results", ticker, model_name)
     os.makedirs(output_dir, exist_ok=True)
-    np.save(os.path.join(output_dir, f"{ticker}_predictions.npy"), preds)
-    np.save(os.path.join(output_dir, f"{ticker}_ground_truth.npy"), trues)
+    np.save(os.path.join(output_dir, "predictions.npy"), preds)
+    np.save(os.path.join(output_dir, "ground_truth.npy"), trues)
     print(f"\nPredictions saved to {output_dir}/")
 
 
