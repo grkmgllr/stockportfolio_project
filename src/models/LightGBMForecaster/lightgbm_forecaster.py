@@ -212,34 +212,69 @@ class LightGBMForecaster:
         early_stopping_rounds: int = 50,
     ) -> "LightGBMForecaster":
         """
-        Train the forecaster on raw OHLCV DataFrames.
+        Train the forecaster on one ticker's raw OHLCV DataFrames.
 
         Targets are percentage returns: (future_price - anchor) / anchor.
         This makes targets scale-invariant, matching the features.
-
-        Args:
-            df_train: Training split (raw OHLCV + optional MA columns).
-            df_val: Validation split (immediately follows training data).
-            target_features: Ordered target column names
-                (e.g. ``['High', 'Close', 'EMA_20', 'SMA_50']``).
-            early_stopping_rounds: Stop if val MAE doesn't improve.
-
-        Returns:
-            self
         """
         self.target_features = target_features
+        arrays = self._build_arrays(df_train, df_val, target_features)
+        self._print_training_header([arrays])
+        self._fit_from_arrays(arrays, early_stopping_rounds)
+        return self
 
-        # Concatenate train+val for feature engineering (so rolling
-        # windows at the start of val are computed correctly), then
-        # split back.
+    def fit_pooled(
+        self,
+        train_dfs: List[pd.DataFrame],
+        val_dfs: List[pd.DataFrame],
+        target_features: List[str],
+        early_stopping_rounds: int = 50,
+        ticker_labels: Optional[List[str]] = None,
+    ) -> "LightGBMForecaster":
+        """
+        Train one model on multiple tickers without leaking across boundaries.
+
+        Feature engineering (rolling / ewm / lag) and target shifting are
+        performed **inside each ticker's frame** first — only the resulting
+        (X, y) arrays are concatenated.  Naively concatenating the raw
+        DataFrames instead makes the last rows of ticker A pull rolling
+        state and even future-target values out of ticker B.
+        """
+        assert len(train_dfs) == len(val_dfs)
+        self.target_features = target_features
+
+        per_ticker = [
+            self._build_arrays(dt, dv, target_features)
+            for dt, dv in zip(train_dfs, val_dfs)
+        ]
+        pooled = self._pool_arrays(per_ticker)
+        self._print_training_header(per_ticker, ticker_labels=ticker_labels)
+        self._fit_from_arrays(pooled, early_stopping_rounds)
+        return self
+
+    # ------------------------------------------------------------------
+    # Internals shared by fit / fit_pooled
+    # ------------------------------------------------------------------
+
+    def _build_arrays(
+        self,
+        df_train: pd.DataFrame,
+        df_val: pd.DataFrame,
+        target_features: List[str],
+    ) -> Dict[str, Any]:
+        """Compute features and returns for one ticker's train+val split.
+
+        Feature engineering runs on ``concat(df_train, df_val)`` so that
+        rolling windows at the start of val are seeded by the tail of
+        train — this is safe because both come from the same ticker.
+        """
         df_full = pd.concat([df_train, df_val], ignore_index=True)
         feat_full = self.engineer_features(df_full)
-        self.feature_names = list(feat_full.columns)
+        feature_names = list(feat_full.columns)
 
         n_train = len(df_train)
         n_val = len(df_val)
 
-        # Usable indices: must have seq_len history AND pred_len future
         train_start = self.seq_len
         train_end = n_train - self.pred_len
         val_start = max(n_train, self.seq_len)
@@ -252,74 +287,154 @@ class LightGBMForecaster:
             )
 
         X_feat = feat_full.values.astype(np.float64)
-
         X_feat = np.nan_to_num(X_feat, nan=0.0, posinf=0.0, neginf=0.0)
 
-        X_train = pd.DataFrame(X_feat[train_start:train_end], columns=self.feature_names)
-        X_val = (pd.DataFrame(X_feat[val_start:val_end], columns=self.feature_names)
-                 if val_end > val_start else None)
+        X_train = X_feat[train_start:train_end]
+        X_val = X_feat[val_start:val_end] if val_end > val_start else None
 
-        n_models = self.pred_len * len(target_features)
-
-        print(f"\n{'='*60}")
-        print(f"LightGBM Forecaster Training")
-        print(f"{'='*60}")
-        print(f"Features: {len(self.feature_names)}")
-        print(f"Train samples: {len(X_train)}")
-        if X_val is not None:
-            print(f"Val samples:   {len(X_val)}")
-        print(f"Targets: {target_features}")
-        print(f"Pred steps: {self.pred_len}  |  Models to train: {n_models}")
-        print(f"Target type: percentage return (scale-invariant)")
-        print(f"{'='*60}\n")
-
-        self.models = {}
-
-        # Anchor price: the Close at each sample position.
-        # Targets are percentage returns: (target_price - anchor) / anchor.
         anchor_col = df_full["Close"].values
+        anchor_train = anchor_col[train_start:train_end]
+        anchor_val = anchor_col[val_start:val_end] if val_end > val_start else None
+
+        y_train: Dict[tuple, np.ndarray] = {}
+        y_val: Dict[tuple, np.ndarray] = {}
+        y_val_abs: Dict[tuple, np.ndarray] = {}
 
         for step in range(1, self.pred_len + 1):
             for target_name in target_features:
                 target_col = df_full[target_name].values
+                y_train[(step, target_name)] = (
+                    (target_col[train_start + step:train_end + step] - anchor_train)
+                    / anchor_train
+                )
+                if X_val is not None:
+                    abs_true = target_col[val_start + step:val_end + step]
+                    y_val_abs[(step, target_name)] = abs_true
+                    y_val[(step, target_name)] = (abs_true - anchor_val) / anchor_val
 
-                anchor_train = anchor_col[train_start:train_end]
-                y_train = (target_col[train_start + step : train_end + step]
-                           - anchor_train) / anchor_train
+        return {
+            "X_train": X_train,
+            "X_val": X_val,
+            "anchor_val": anchor_val,
+            "y_train": y_train,
+            "y_val": y_val,
+            "y_val_abs": y_val_abs,
+            "feature_names": feature_names,
+        }
 
+    def _pool_arrays(self, per_ticker: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Concatenate the per-ticker (X, y) arrays for a joint fit."""
+        feature_names = per_ticker[0]["feature_names"]
+        for pt in per_ticker[1:]:
+            if pt["feature_names"] != feature_names:
+                raise ValueError(
+                    "Ticker feature sets differ — cannot pool. "
+                    "Check that all tickers have the same optional columns "
+                    "(Vwap, Transactions, Date, MA targets)."
+                )
+
+        X_train = np.concatenate([pt["X_train"] for pt in per_ticker], axis=0)
+        val_chunks = [pt["X_val"] for pt in per_ticker if pt["X_val"] is not None]
+        X_val = np.concatenate(val_chunks, axis=0) if val_chunks else None
+
+        anchor_val_chunks = [pt["anchor_val"] for pt in per_ticker
+                             if pt["anchor_val"] is not None]
+        anchor_val = np.concatenate(anchor_val_chunks) if anchor_val_chunks else None
+
+        y_train: Dict[tuple, np.ndarray] = {}
+        y_val: Dict[tuple, np.ndarray] = {}
+        y_val_abs: Dict[tuple, np.ndarray] = {}
+        keys = per_ticker[0]["y_train"].keys()
+        for key in keys:
+            y_train[key] = np.concatenate([pt["y_train"][key] for pt in per_ticker])
+            val_ys = [pt["y_val"][key] for pt in per_ticker if key in pt["y_val"]]
+            if val_ys:
+                y_val[key] = np.concatenate(val_ys)
+                y_val_abs[key] = np.concatenate(
+                    [pt["y_val_abs"][key] for pt in per_ticker if key in pt["y_val_abs"]]
+                )
+
+        return {
+            "X_train": X_train,
+            "X_val": X_val,
+            "anchor_val": anchor_val,
+            "y_train": y_train,
+            "y_val": y_val,
+            "y_val_abs": y_val_abs,
+            "feature_names": feature_names,
+        }
+
+    def _print_training_header(
+        self,
+        per_ticker: List[Dict[str, Any]],
+        ticker_labels: Optional[List[str]] = None,
+    ) -> None:
+        """Emit the training banner shown before per-model training lines."""
+        n_train_total = sum(len(pt["X_train"]) for pt in per_ticker)
+        n_val_total = sum(
+            len(pt["X_val"]) for pt in per_ticker if pt["X_val"] is not None
+        )
+        n_models = self.pred_len * len(self.target_features)
+
+        print(f"\n{'=' * 60}")
+        print("LightGBM Forecaster Training")
+        print(f"{'=' * 60}")
+        print(f"Features: {len(per_ticker[0]['feature_names'])}")
+        if len(per_ticker) > 1:
+            print(f"Pooled tickers: {len(per_ticker)}"
+                  + (f" ({', '.join(ticker_labels)})" if ticker_labels else ""))
+            for i, pt in enumerate(per_ticker):
+                tag = ticker_labels[i] if ticker_labels else f"#{i}"
+                val_len = len(pt["X_val"]) if pt["X_val"] is not None else 0
+                print(f"  {tag:8s} train={len(pt['X_train'])} val={val_len}")
+        print(f"Train samples: {n_train_total}")
+        print(f"Val samples:   {n_val_total}")
+        print(f"Targets: {self.target_features}")
+        print(f"Pred steps: {self.pred_len}  |  Models to train: {n_models}")
+        print("Target type: percentage return (scale-invariant)")
+        print(f"{'=' * 60}\n")
+
+    def _fit_from_arrays(
+        self, arrays: Dict[str, Any], early_stopping_rounds: int,
+    ) -> None:
+        """Train one LGBMRegressor per (step, target) from pre-built arrays."""
+        self.feature_names = arrays["feature_names"]
+        X_train = pd.DataFrame(arrays["X_train"], columns=self.feature_names)
+        X_val = (
+            pd.DataFrame(arrays["X_val"], columns=self.feature_names)
+            if arrays["X_val"] is not None else None
+        )
+        anchor_val = arrays["anchor_val"]
+
+        self.models = {}
+        for step in range(1, self.pred_len + 1):
+            for target_name in self.target_features:
+                key = (step, target_name)
                 model = lgb.LGBMRegressor(**self._params)
 
                 fit_kwargs: Dict[str, Any] = {}
-                if X_val is not None and val_end > val_start:
-                    anchor_val = anchor_col[val_start:val_end]
-                    y_val = (target_col[val_start + step : val_end + step]
-                             - anchor_val) / anchor_val
-                    fit_kwargs["eval_set"] = [(X_val, y_val)]
+                if X_val is not None and key in arrays["y_val"]:
+                    fit_kwargs["eval_set"] = [(X_val, arrays["y_val"][key])]
                     fit_kwargs["callbacks"] = [
                         lgb.early_stopping(early_stopping_rounds, verbose=False),
                         lgb.log_evaluation(period=0),
                     ]
 
-                model.fit(X_train, y_train, **fit_kwargs)
-
-                key = (step, target_name)
+                model.fit(X_train, arrays["y_train"][key], **fit_kwargs)
                 self.models[key] = model
 
                 best_iter = getattr(model, "best_iteration_", model.n_estimators)
                 val_score = ""
-                if X_val is not None:
-                    anchor_val = anchor_col[val_start:val_end]
+                if X_val is not None and key in arrays["y_val_abs"]:
                     pct_pred = model.predict(X_val)
                     abs_pred = anchor_val * (1.0 + pct_pred)
-                    abs_true = target_col[val_start + step : val_end + step]
-                    mae = np.mean(np.abs(abs_pred - abs_true))
+                    mae = float(np.mean(np.abs(abs_pred - arrays["y_val_abs"][key])))
                     val_score = f"  val_MAE=${mae:.2f}"
 
                 print(f"  step={step} target={target_name:8s}  "
                       f"best_iter={best_iter}{val_score}")
 
         print(f"\nTraining complete. {len(self.models)} models trained.\n")
-        return self
 
     # ------------------------------------------------------------------
     # Prediction

@@ -4,7 +4,6 @@ import os
 from typing import List, Tuple
 
 import numpy as np
-import pandas as pd
 
 from models.LightGBMForecaster import LightGBMForecaster
 from paths import CHECKPOINTS_ROOT, forecaster_checkpoint
@@ -45,7 +44,12 @@ def train_one(ticker: str, data_root: str, ma_targets: List[str],
 def train_pooled(tickers: List[str], data_root: str, ma_targets: List[str],
                  seq_len: int, pred_len: int,
                  patience: int = 30) -> LightGBMForecaster:
-    """Train one LightGBM model on the concatenation of every ticker's split."""
+    """Train one LightGBM model on many tickers without cross-ticker leakage.
+
+    Each ticker's (X, y) arrays are built inside its own frame — feature
+    engineering (rolling / ewm / lag / shift) never crosses a ticker
+    boundary — and only the resulting matrices are pooled.
+    """
     print(f"\nPooled LightGBM training: {', '.join(tickers)}")
 
     train_dfs, val_dfs = [], []
@@ -57,15 +61,12 @@ def train_pooled(tickers: List[str], data_root: str, ma_targets: List[str],
         target_features = target_features or tf
         print(f"  {t}: train={train_end}, val={val_end - train_end}")
 
-    df_train = pd.concat(train_dfs, ignore_index=True)
-    df_val = pd.concat(val_dfs, ignore_index=True)
-    print(f"  Total: train={len(df_train)}, val={len(df_val)}")
-
     forecaster = LightGBMForecaster(seq_len=seq_len, pred_len=pred_len)
-    forecaster.fit(
-        df_train, df_val,
+    forecaster.fit_pooled(
+        train_dfs=train_dfs, val_dfs=val_dfs,
         target_features=target_features,
         early_stopping_rounds=patience * 5,
+        ticker_labels=tickers,
     )
 
     os.makedirs(CHECKPOINTS_ROOT, exist_ok=True)
