@@ -120,8 +120,30 @@ def build_meta_dataset(
 
     # ── 6. Drop warm-up NaNs ──
     n_before = len(df_labeled)
-    df_labeled = df_labeled.dropna().reset_index(drop=True)
+    df_labeled = df_labeled.dropna()          # keep OLD positional index
+    survivors_old = df_labeled.index.values   # OLD positions that survived
+    df_labeled = df_labeled.reset_index(drop=True)
     print(f"Dropped {n_before - len(df_labeled)} warm-up rows with NaN values.")
+
+    # ── 7. Re-align event window indices to the reset-index space ──
+    # Before this step, `t_start` / `t_end` still refer to positions in the
+    # pre-dropna DataFrame.  PurgedKFold compares them against fold
+    # boundaries that live in the post-dropna coordinate system, so mixing
+    # the two silently defeats the purge and leaks training data.
+    # See src/trading_logic/purged_cv.py:split.
+    #
+    # After `apply_triple_barrier`, `t_start[i]` always equals row i's own
+    # position, so in the new frame it collapses to `arange(n_new)`.
+    # `t_end` is remapped via searchsorted; if the exact end row was
+    # dropped (rare — only prefix warm-up gets dropped in practice), we
+    # snap to the next surviving row, or clamp to the last one.
+    n_new = len(df_labeled)
+    old_t_end = df_labeled["t_end"].values
+    new_t_end = np.searchsorted(survivors_old, old_t_end, side="left")
+    new_t_end = np.minimum(new_t_end, n_new - 1)
+
+    df_labeled["t_start"] = np.arange(n_new, dtype=np.int64)
+    df_labeled["t_end"] = new_t_end.astype(np.int64)
 
     return df_labeled
 
