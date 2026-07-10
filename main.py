@@ -90,6 +90,24 @@ def cmd_train(args):
                 seq_len=args.seq_len, pred_len=args.pred_len,
                 patience=args.patience,
             )
+    elif args.model == "StockMixer":
+        # Cross-stock model — jointly trained on all tickers at once.
+        if len(tickers) < 2:
+            raise SystemExit(
+                "StockMixer requires --tickers with at least 2 symbols "
+                "(it is a cross-stock model)."
+            )
+        from forecasting import crossstock_runner
+        crossstock_runner.train(
+            tickers, args.model, ma_targets,
+            seq_len=args.seq_len, pred_len=args.pred_len,
+            epochs=args.epochs, batch_size=args.batch_size,
+            lr=args.lr, patience=args.patience,
+            alpha=getattr(args, "alpha", 0.1),
+            market_dim=getattr(args, "market_dim", 20),
+            seed=getattr(args, "seed", 42),
+            data_root=args.data_root,
+        )
     else:
         pytorch_runner.train(
             tickers, args.model, ma_targets,
@@ -115,6 +133,27 @@ def cmd_test(args):
             CHECKPOINTS_ROOT, f"pooled_{model_name}_best.pt",
         )
 
+    # Cross-stock models score every ticker in one forward pass, so we
+    # pre-compute the results dict here and reuse it inside the per-ticker
+    # loop below (mirroring the pytorch_runner.evaluate return shape).
+    crossstock_results = None
+    if model_name == "StockMixer":
+        if len(tickers) < 2:
+            raise SystemExit(
+                "StockMixer test requires --tickers with at least 2 symbols."
+            )
+        from forecasting import crossstock_runner
+        checkpoint_override = os.path.join(
+            CHECKPOINTS_ROOT, f"crossstock_{model_name}_best.pt",
+        )
+        crossstock_results = crossstock_runner.evaluate(
+            tickers, model_name, ma_targets,
+            seq_len=args.seq_len, pred_len=args.pred_len,
+            batch_size=args.batch_size, data_root=args.data_root,
+            market_dim=getattr(args, "market_dim", 20),
+            checkpoint_override=checkpoint_override,
+        )
+
     all_results = {}
     for ticker in tickers:
         if is_pooled:
@@ -128,6 +167,8 @@ def cmd_test(args):
                 ticker, args.data_root, ma_targets,
                 seq_len=args.seq_len, pred_len=args.pred_len,
             )
+        elif model_name == "StockMixer":
+            preds, trues, target_names, eval_results = crossstock_results[ticker]
         else:
             preds, trues, target_names, eval_results = pytorch_runner.evaluate(
                 ticker, model_name, ma_targets,
@@ -260,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--tickers", nargs="+", default=None,
                        help="Multiple tickers for pooled training/eval (e.g. AAPL MSFT GOOGL)")
         p.add_argument("--model", type=str, default="LightGBM",
-                       choices=["LightGBM", "TimesNet", "TimeMixer"])
+                       choices=["LightGBM", "TimesNet", "TimeMixer", "StockMixer"])
         p.add_argument("--seq_len", type=int, default=30)
         p.add_argument("--pred_len", type=int, default=5)
         p.add_argument("--data_root", type=str, default=DATA_ROOT)
@@ -275,17 +316,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--lr", type=float, default=2e-4)
     p_train.add_argument("--patience", type=int, default=30,
                          help="Early stopping patience (epochs without improvement)")
+    p_train.add_argument("--alpha", type=float, default=0.1,
+                         help="Rank-loss weight (StockMixer only). "
+                              "0.0 disables the rank term, paper default is 0.1.")
+    p_train.add_argument("--market_dim", type=int, default=20,
+                         help="Cross-stock hidden dimension m (StockMixer only). "
+                              "Paper uses 20 for NASDAQ; sweep to tune for your universe.")
+    p_train.add_argument("--seed", type=int, default=42,
+                         help="Random seed for reproducibility (StockMixer only).")
 
     # --- test ---
     p_test = subparsers.add_parser("test", help="Evaluate a trained model")
     add_common_args(p_test)
     p_test.add_argument("--batch_size", type=int, default=32)
+    p_test.add_argument("--market_dim", type=int, default=20,
+                        help="Must match the value used at train time (StockMixer only).")
 
     # --- meta-label ---
     p_meta = subparsers.add_parser("meta-label", help="Generate triple-barrier meta-labels")
     p_meta.add_argument("--ticker", type=str, default="AAPL")
     p_meta.add_argument("--model", type=str, default="LightGBM",
-                        choices=["LightGBM", "TimesNet", "TimeMixer"],
+                        choices=["LightGBM", "TimesNet", "TimeMixer", "StockMixer"],
                         help="Primary forecaster whose predictions to label")
     p_meta.add_argument("--seq_len", type=int, default=30)
     p_meta.add_argument("--pred_len", type=int, default=5)
@@ -296,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_tmeta = subparsers.add_parser("train-meta", help="Train the meta-classifier")
     p_tmeta.add_argument("--ticker", type=str, default="AAPL")
     p_tmeta.add_argument("--model", type=str, default="LightGBM",
-                         choices=["LightGBM", "TimesNet", "TimeMixer"],
+                         choices=["LightGBM", "TimesNet", "TimeMixer", "StockMixer"],
                          help="Primary forecaster whose meta-labels to train on")
     p_tmeta.add_argument("--threshold", type=float, default=0.5)
 
@@ -304,7 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval = subparsers.add_parser("evaluate", help="Evaluate meta-labeling precision lift")
     p_eval.add_argument("--ticker", type=str, default="AAPL")
     p_eval.add_argument("--model", type=str, default="LightGBM",
-                        choices=["LightGBM", "TimesNet", "TimeMixer"],
+                        choices=["LightGBM", "TimesNet", "TimeMixer", "StockMixer"],
                         help="Primary forecaster whose meta-predictions to evaluate")
     p_eval.add_argument("--threshold", type=float, default=0.5)
 
@@ -317,6 +368,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--lr", type=float, default=2e-4)
     p_all.add_argument("--patience", type=int, default=30,
                        help="Early stopping patience (epochs without improvement)")
+    p_all.add_argument("--alpha", type=float, default=0.1,
+                       help="Rank-loss weight (StockMixer only). "
+                            "0.0 disables the rank term, paper default is 0.1.")
+    p_all.add_argument("--market_dim", type=int, default=20,
+                       help="Cross-stock hidden dimension m (StockMixer only). "
+                            "Paper uses 20 for NASDAQ; sweep to tune for your universe.")
+    p_all.add_argument("--seed", type=int, default=42,
+                       help="Random seed for reproducibility (StockMixer only).")
     p_all.add_argument("--threshold", type=float, default=0.5)
 
     return parser

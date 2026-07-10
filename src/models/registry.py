@@ -7,13 +7,16 @@ becomes visible to both training and evaluation without touching them.
 from models import (
     TimeMixer, TimeMixerConfig,
     TimesNetModel, TimesNetConfig,
+    StockMixer, StockMixerConfig,
 )
 
 
 def get_model_config(model_name: str, seq_len: int, pred_len: int,
                      enc_in: int = 5, c_out: int = 2,
                      denorm_indices: tuple | None = None,
-                     return_targets: bool = False):
+                     return_targets: bool = False,
+                     num_stocks: int | None = None,
+                     market_dim: int = 20):
     """
     Get model config for stock price prediction.
 
@@ -23,6 +26,9 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int,
     denorm_indices maps each output channel to the input channel whose
     per-sample mean/std should be used for NS-Norm / RevIN denormalization.
     When return_targets=True, denormalization is skipped (model outputs returns).
+
+    num_stocks is only used by cross-stock models (StockMixer) and must
+    equal the number of tickers packed into each sample by CrossStockDataset.
     """
     if model_name == "TimesNet":
         return TimesNetConfig(
@@ -66,6 +72,26 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int,
             denorm_indices=denorm_indices,
             return_targets=return_targets,
         )
+    if model_name == "StockMixer":
+        if num_stocks is None:
+            raise ValueError(
+                "StockMixer requires num_stocks (pass the CrossStockDataset's "
+                "num_stocks). It is a cross-stock model — see CrossStockDataset."
+            )
+        if not return_targets:
+            raise ValueError(
+                "StockMixer is a return-basis model; use return_targets=True."
+            )
+        return StockMixerConfig(
+            seq_len=seq_len,
+            pred_len=pred_len,
+            enc_in=enc_in,
+            c_out=c_out,
+            num_stocks=num_stocks,
+            market_dim=market_dim,
+            denorm_indices=denorm_indices,
+            return_targets=return_targets,
+        )
     raise ValueError(f"Unknown model: {model_name}")
 
 
@@ -75,4 +101,6 @@ def get_model(model_name: str, config):
         return TimesNetModel(config)
     if model_name == "TimeMixer":
         return TimeMixer(config)
+    if model_name == "StockMixer":
+        return StockMixer(config)
     raise ValueError(f"Unknown model: {model_name}")

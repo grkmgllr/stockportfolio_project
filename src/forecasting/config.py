@@ -19,7 +19,7 @@ def _default_device() -> str:
 @dataclass
 class TrainingConfig:
     """Hyperparameters and runtime settings for one training run."""
-    model_name: Literal["TimeMixer", "TimesNet", "LightGBM"] = "TimesNet"
+    model_name: Literal["TimeMixer", "TimesNet", "LightGBM", "StockMixer"] = "TimesNet"
 
     ticker: str = "AAPL"
     data_root: str = DATA_ROOT
@@ -43,7 +43,7 @@ class TrainingConfig:
 @dataclass
 class TestConfig:
     """Runtime settings for evaluating a trained forecaster."""
-    model_name: Literal["TimeMixer", "TimesNet", "LightGBM"] = "TimesNet"
+    model_name: Literal["TimeMixer", "TimesNet", "LightGBM", "StockMixer"] = "TimesNet"
     ticker: str = "AAPL"
     data_root: str = DATA_ROOT
     seq_len: int = 14
