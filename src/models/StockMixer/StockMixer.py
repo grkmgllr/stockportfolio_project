@@ -53,7 +53,7 @@ class StockMixerConfig:
     enc_in: int
     c_out: int
     num_stocks: int
-    market_dim: int = 20
+    market_dim: int = 2
     denorm_indices: Optional[tuple] = None
     return_targets: bool = True
 

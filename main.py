@@ -104,7 +104,7 @@ def cmd_train(args):
             epochs=args.epochs, batch_size=args.batch_size,
             lr=args.lr, patience=args.patience,
             alpha=getattr(args, "alpha", 0.1),
-            market_dim=getattr(args, "market_dim", 20),
+            market_dim=getattr(args, "market_dim", 2),
             seed=getattr(args, "seed", 42),
             data_root=args.data_root,
         )
@@ -150,7 +150,7 @@ def cmd_test(args):
             tickers, model_name, ma_targets,
             seq_len=args.seq_len, pred_len=args.pred_len,
             batch_size=args.batch_size, data_root=args.data_root,
-            market_dim=getattr(args, "market_dim", 20),
+            market_dim=getattr(args, "market_dim", 2),
             checkpoint_override=checkpoint_override,
         )
 
@@ -319,9 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--alpha", type=float, default=0.1,
                          help="Rank-loss weight (StockMixer only). "
                               "0.0 disables the rank term, paper default is 0.1.")
-    p_train.add_argument("--market_dim", type=int, default=20,
+    p_train.add_argument("--market_dim", type=int, default=2,
                          help="Cross-stock hidden dimension m (StockMixer only). "
-                              "Paper uses 20 for NASDAQ; sweep to tune for your universe.")
+                              "Default 2 chosen via seed-averaged ablation on our 5-ticker universe; "
+                              "sweep to re-tune for other universes.")
     p_train.add_argument("--seed", type=int, default=42,
                          help="Random seed for reproducibility (StockMixer only).")
 
@@ -329,7 +330,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_test = subparsers.add_parser("test", help="Evaluate a trained model")
     add_common_args(p_test)
     p_test.add_argument("--batch_size", type=int, default=32)
-    p_test.add_argument("--market_dim", type=int, default=20,
+    p_test.add_argument("--market_dim", type=int, default=2,
                         help="Must match the value used at train time (StockMixer only).")
 
     # --- meta-label ---
@@ -371,9 +372,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--alpha", type=float, default=0.1,
                        help="Rank-loss weight (StockMixer only). "
                             "0.0 disables the rank term, paper default is 0.1.")
-    p_all.add_argument("--market_dim", type=int, default=20,
+    p_all.add_argument("--market_dim", type=int, default=2,
                        help="Cross-stock hidden dimension m (StockMixer only). "
-                            "Paper uses 20 for NASDAQ; sweep to tune for your universe.")
+                            "Default 2 chosen from ablation on our 5-ticker universe; "
+                            "paper uses 20 for NASDAQ.")
     p_all.add_argument("--seed", type=int, default=42,
                        help="Random seed for reproducibility (StockMixer only).")
     p_all.add_argument("--threshold", type=float, default=0.5)

@@ -16,7 +16,7 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int,
                      denorm_indices: tuple | None = None,
                      return_targets: bool = False,
                      num_stocks: int | None = None,
-                     market_dim: int = 20):
+                     market_dim: int = 2):
     """
     Get model config for stock price prediction.
 
