@@ -2,6 +2,7 @@
 from .base import ForecastModel
 from .TimeMixer import TimeMixer, TimeMixerConfig
 from .TimesNet import TimesNetModel, TimesNetConfig
+from .StockMixer import StockMixer, StockMixerConfig
 from .LightGBMForecaster import LightGBMForecaster
 
 __all__ = [
@@ -10,5 +11,7 @@ __all__ = [
     "TimeMixerConfig",
     "TimesNetModel",
     "TimesNetConfig",
+    "StockMixer",
+    "StockMixerConfig",
     "LightGBMForecaster",
 ]
