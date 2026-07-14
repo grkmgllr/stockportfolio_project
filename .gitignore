@@ -20,9 +20,8 @@ venv/
 .cursor/
 .claude/
 
-# DATASETS - Ignore the raw and processed data (repo root only,
-# so src/data/ Python module isn't shadowed)
-/data/
+# DATASETS - Ignore the raw and processed data
+data/
 *.csv
 *.npy
 *.parquet
