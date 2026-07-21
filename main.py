@@ -35,9 +35,6 @@ from reporting import print_test_results, save_run_metrics
 from utils import calculate_metrics
 
 
-ALL_TICKERS = ["AAPL", "NVDA", "META", "GOOGL", "MSFT"]
-
-
 # ─────────────────────────────────────────────────────────────────────
 # Subcommands
 # ─────────────────────────────────────────────────────────────────────
@@ -62,13 +59,13 @@ def cmd_train(args):
             lightgbm_runner.train_pooled(
                 tickers, args.data_root, ma_targets,
                 seq_len=args.seq_len, pred_len=args.pred_len,
-                patience=args.patience,
+                patience=args.patience, start_date=args.start_date,
             )
         else:
             lightgbm_runner.train_one(
                 tickers[0], args.data_root, ma_targets,
                 seq_len=args.seq_len, pred_len=args.pred_len,
-                patience=args.patience,
+                patience=args.patience, start_date=args.start_date,
             )
     elif args.model == "StockMixer":
         # Cross-stock model — jointly trained on all tickers at once.
@@ -86,7 +83,7 @@ def cmd_train(args):
             alpha=getattr(args, "alpha", 0.1),
             market_dim=getattr(args, "market_dim", 2),
             seed=getattr(args, "seed", 42),
-            data_root=args.data_root,
+            data_root=args.data_root, start_date=args.start_date,
         )
     else:
         pytorch_runner.train(
@@ -94,7 +91,7 @@ def cmd_train(args):
             seq_len=args.seq_len, pred_len=args.pred_len,
             epochs=args.epochs, batch_size=args.batch_size,
             lr=args.lr, patience=args.patience,
-            data_root=args.data_root,
+            data_root=args.data_root, start_date=args.start_date,
         )
 
 
@@ -134,6 +131,7 @@ def cmd_test(args):
             batch_size=args.batch_size, data_root=args.data_root,
             market_dim=getattr(args, "market_dim", 2),
             checkpoint_override=checkpoint_override,
+            start_date=args.start_date,
         )
 
     all_results = {}
@@ -149,6 +147,7 @@ def cmd_test(args):
                 ticker, args.data_root, ma_targets,
                 seq_len=args.seq_len, pred_len=args.pred_len,
                 checkpoint_override=checkpoint_override,
+                start_date=args.start_date,
             )
         elif model_name == "StockMixer":
             preds, trues, target_names, eval_results = crossstock_results[ticker]
@@ -158,6 +157,7 @@ def cmd_test(args):
                 seq_len=args.seq_len, pred_len=args.pred_len,
                 batch_size=args.batch_size, data_root=args.data_root,
                 checkpoint_override=checkpoint_override,
+                start_date=args.start_date,
             )
 
         results = {"overall": calculate_metrics(preds, trues)}
@@ -291,6 +291,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--seq_len", type=int, default=30)
         p.add_argument("--pred_len", type=int, default=5)
         p.add_argument("--data_root", type=str, default=DATA_ROOT)
+        p.add_argument("--start_date", type=str, default="2022-01-01",
+                       help="Train/test on rows from this ISO date onward "
+                            "(default 2022-01-01). Set earlier to use more of "
+                            "the fetched history.")
         p.add_argument("--ma_targets", nargs="*", default=None,
                        help="MA targets (e.g. EMA_20 SMA_50)")
 

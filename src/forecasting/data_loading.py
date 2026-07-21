@@ -1,19 +1,25 @@
 """Raw-CSV loading shared by LightGBM and PyTorch trainers/evaluators."""
+from __future__ import annotations
 
 import os
 from typing import List
 
 import pandas as pd
 
-from dataset import ParquetDataset
+from dataset import StockDataset
 
 
 def load_raw_df(ticker: str, data_root: str, ma_targets: List[str],
-                train_ratio: float = 0.7, val_ratio: float = 0.15):
+                train_ratio: float = 0.7, val_ratio: float = 0.15,
+                start_date: str | None = None):
     """Load CSV, compute MA columns, trim warm-up, and split.
 
     Returns (df, train_end, val_end, target_features) — where target_features
     is ["High", "Close", *ma_targets_not_already_in_High_Close].
+
+    ``start_date`` filters rows to that ISO date onward (before MA computation),
+    mirroring StockDataset so LightGBM trains on the same window as the
+    neural models. Pass None to use the whole CSV.
     """
     csv_path = os.path.join(data_root, f"{ticker}.csv")
     if not os.path.exists(csv_path):
@@ -22,17 +28,20 @@ def load_raw_df(ticker: str, data_root: str, ma_targets: List[str],
             f"Run: python src/scripts/fetch_data.py first."
         )
 
-    df = pd.read_csv(csv_path).ffill().bfill()
+    df = pd.read_csv(csv_path)
+    if start_date and "Date" in df.columns:
+        df = df[df["Date"] >= start_date].reset_index(drop=True)
+    df = df.ffill().bfill()
 
     for ma_name in ma_targets:
-        cfg = ParquetDataset.MA_CONFIGS[ma_name]
-        df[ma_name] = ParquetDataset._compute_ma(
+        cfg = StockDataset.MA_CONFIGS[ma_name]
+        df[ma_name] = StockDataset._compute_ma(
             df["Close"], cfg["method"], cfg["period"],
         )
 
     if ma_targets:
         max_period = max(
-            ParquetDataset.MA_CONFIGS[n]["period"] for n in ma_targets
+            StockDataset.MA_CONFIGS[n]["period"] for n in ma_targets
         )
         df = df.iloc[max_period - 1:].reset_index(drop=True)
 

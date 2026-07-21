@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Literal
 from features import FEATURE_COLUMNS
 
 
-class ParquetDataset(Dataset):
+class StockDataset(Dataset):
     """
     Sliding-window dataset for stock price forecasting.
 
@@ -333,5 +333,7 @@ class ParquetDataset(Dataset):
         return tuple(indices)
 
 
-# Backward-compatible alias
-YahooDataset = ParquetDataset
+# Backward-compatible aliases (the class used to be ParquetDataset; it now
+# reads Yahoo Finance CSVs, so StockDataset is the canonical name).
+ParquetDataset = StockDataset
+YahooDataset = StockDataset

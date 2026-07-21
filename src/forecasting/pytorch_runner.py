@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader
 
-from dataset import ParquetDataset
+from dataset import StockDataset
 from models.registry import get_model, get_model_config
 from paths import CHECKPOINTS_ROOT, forecaster_checkpoint
 from utils import EarlyStopping, get_scheduler, load_checkpoint
@@ -24,6 +24,7 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
           *, seq_len: int, pred_len: int,
           epochs: int, batch_size: int, lr: float,
           patience: int, data_root: str,
+          start_date: str | None = "2022-01-01",
           device: str | None = None,
           checkpoint_dir: str = CHECKPOINTS_ROOT) -> str:
     """Train a PyTorch forecaster (optionally on pooled tickers).
@@ -52,15 +53,15 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
     print("Loading Data...")
     train_datasets, val_datasets = [], []
     for t in tickers:
-        train_datasets.append(ParquetDataset(
+        train_datasets.append(StockDataset(
             ticker=t, root_path=train_cfg.data_root, flag="train",
             seq_len=train_cfg.seq_len, pred_len=train_cfg.pred_len,
-            ma_targets=ma_targets, return_targets=True,
+            ma_targets=ma_targets, return_targets=True, start_date=start_date,
         ))
-        val_datasets.append(ParquetDataset(
+        val_datasets.append(StockDataset(
             ticker=t, root_path=train_cfg.data_root, flag="val",
             seq_len=train_cfg.seq_len, pred_len=train_cfg.pred_len,
-            ma_targets=ma_targets, return_targets=True,
+            ma_targets=ma_targets, return_targets=True, start_date=start_date,
         ))
 
     if len(tickers) > 1:
@@ -157,14 +158,15 @@ def evaluate(ticker: str, model_name: str, ma_targets: List[str],
              *, seq_len: int, pred_len: int,
              batch_size: int, data_root: str,
              checkpoint_override: str | None = None,
+             start_date: str | None = "2022-01-01",
              device: str | None = None,
              checkpoint_dir: str = CHECKPOINTS_ROOT
              ) -> Tuple[np.ndarray, np.ndarray, List[str], dict]:
     """Load a saved PyTorch model and evaluate on one ticker's test split."""
-    test_dataset = ParquetDataset(
+    test_dataset = StockDataset(
         ticker=ticker, root_path=data_root, flag="test",
         seq_len=seq_len, pred_len=pred_len,
-        ma_targets=ma_targets, return_targets=True,
+        ma_targets=ma_targets, return_targets=True, start_date=start_date,
     )
     test_loader = DataLoader(test_dataset, batch_size=batch_size,
                              shuffle=False, drop_last=False)

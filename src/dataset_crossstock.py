@@ -1,7 +1,7 @@
 """
 Cross-stock dataset for StockMixer-style joint forecasting.
 
-Unlike :class:`dataset.ParquetDataset`, each sample here contains ALL tickers
+Unlike :class:`dataset.StockDataset`, each sample here contains ALL tickers
 at the same time-window:
 
     seq_x: [num_stocks, seq_len, n_input_features]
@@ -24,7 +24,7 @@ import torch
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset
 
-from dataset import ParquetDataset
+from dataset import StockDataset
 
 
 class CrossStockDataset(Dataset):
@@ -35,10 +35,10 @@ class CrossStockDataset(Dataset):
     tickers.
     """
 
-    OHLCV_COLUMNS = ParquetDataset.OHLCV_COLUMNS
-    EXTENDED_COLUMNS = ParquetDataset.EXTENDED_COLUMNS
-    DEFAULT_TARGETS = ParquetDataset.DEFAULT_TARGETS
-    MA_CONFIGS = ParquetDataset.MA_CONFIGS
+    OHLCV_COLUMNS = StockDataset.OHLCV_COLUMNS
+    EXTENDED_COLUMNS = StockDataset.EXTENDED_COLUMNS
+    DEFAULT_TARGETS = StockDataset.DEFAULT_TARGETS
+    MA_CONFIGS = StockDataset.MA_CONFIGS
 
     def __init__(
         self,
@@ -112,7 +112,7 @@ class CrossStockDataset(Dataset):
 
         for ma_name in self.ma_targets:
             cfg = self.MA_CONFIGS[ma_name]
-            df[ma_name] = ParquetDataset._compute_ma(
+            df[ma_name] = StockDataset._compute_ma(
                 df['Close'], cfg['method'], cfg['period'],
             )
         if self.ma_targets:
@@ -294,7 +294,7 @@ class CrossStockDataset(Dataset):
 
     @property
     def denorm_indices(self) -> tuple:
-        """Same semantics as ParquetDataset.denorm_indices — one tuple shared
+        """Same semantics as StockDataset.denorm_indices — one tuple shared
         across all tickers because feature layout is identical."""
         close_idx = self.input_features.index('Close')
         indices = []

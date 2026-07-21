@@ -2,7 +2,7 @@
 Cross-stock trainer and evaluator for StockMixer.
 
 Unlike :mod:`.pytorch_runner`, which loops over per-ticker
-:class:`ParquetDataset` samples, this module drives a single
+:class:`StockDataset` samples, this module drives a single
 :class:`CrossStockDataset` where every sample already contains all tickers
 jointly. The trained model sees all stocks in one forward pass, which is
 what the ``NoGraphMixer`` cross-stock branch needs.
@@ -133,6 +133,7 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
           alpha: float = 0.1,
           market_dim: int = 2,
           seed: int = 42,
+          start_date: str | None = "2022-01-01",
           device: str | None = None,
           checkpoint_dir: str = CHECKPOINTS_ROOT) -> str:
     """Train a cross-stock model on a joint CrossStockDataset.
@@ -168,12 +169,12 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
     train_ds = CrossStockDataset(
         tickers=tickers, root_path=data_root, flag="train",
         seq_len=seq_len, pred_len=pred_len,
-        ma_targets=ma_targets, return_targets=True,
+        ma_targets=ma_targets, return_targets=True, start_date=start_date,
     )
     val_ds = CrossStockDataset(
         tickers=tickers, root_path=data_root, flag="val",
         seq_len=seq_len, pred_len=pred_len,
-        ma_targets=ma_targets, return_targets=True,
+        ma_targets=ma_targets, return_targets=True, start_date=start_date,
     )
 
     model_cfg = get_model_config(
@@ -256,6 +257,7 @@ def evaluate(tickers: List[str], model_name: str, ma_targets: List[str],
              batch_size: int, data_root: str,
              market_dim: int = 2,
              checkpoint_override: str | None = None,
+             start_date: str | None = "2022-01-01",
              device: str | None = None,
              checkpoint_dir: str = CHECKPOINTS_ROOT,
              ) -> Dict[str, Tuple[np.ndarray, np.ndarray, List[str], dict]]:
@@ -270,7 +272,7 @@ def evaluate(tickers: List[str], model_name: str, ma_targets: List[str],
     test_ds = CrossStockDataset(
         tickers=tickers, root_path=data_root, flag="test",
         seq_len=seq_len, pred_len=pred_len,
-        ma_targets=ma_targets, return_targets=True,
+        ma_targets=ma_targets, return_targets=True, start_date=start_date,
     )
     loader = DataLoader(test_ds, batch_size=batch_size,
                         shuffle=False, drop_last=False)

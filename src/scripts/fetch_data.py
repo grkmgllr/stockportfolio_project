@@ -4,7 +4,7 @@ Daily OHLCV downloader from Yahoo Finance + causal feature engineering.
 Downloads daily bars for a universe of tickers, appends the engineered
 feature columns from :mod:`features`, and writes one CSV per ticker into
 ``data/raw/{ticker}.csv``. These CSVs are the single input contract for
-``ParquetDataset`` and ``CrossStockDataset``.
+``StockDataset`` and ``CrossStockDataset``.
 
 This is the whole data pipeline now — Polygon.io minute-bar parquet and
 ``resample_parquet.py`` are no longer used.

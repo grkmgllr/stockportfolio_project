@@ -17,7 +17,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from dataset import ParquetDataset
+from dataset import StockDataset
 from paths import DATA_ROOT, META_ROOT, RESULTS_ROOT, meta_labels_path
 from trading_logic.triple_barrier import apply_triple_barrier
 
@@ -59,11 +59,11 @@ def build_meta_dataset(
         )
     df_raw = pd.read_csv(csv_path).ffill().bfill()
 
-    # When trained with MA targets, ParquetDataset trims warm-up rows before
+    # When trained with MA targets, StockDataset trims warm-up rows before
     # splitting.  Replicate that trim so val_end aligns.
     ma_names_in_targets = [n for n in target_names if n in ("EMA_20", "SMA_50")]
     if ma_names_in_targets:
-        ma_periods = [ParquetDataset.MA_CONFIGS[n]["period"]
+        ma_periods = [StockDataset.MA_CONFIGS[n]["period"]
                       for n in ma_names_in_targets]
         trim = max(ma_periods) - 1
         df_raw = df_raw.iloc[trim:].reset_index(drop=True)
