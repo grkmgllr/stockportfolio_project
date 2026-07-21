@@ -1,3 +1,16 @@
+"""
+TimeMixer model definition.
+
+Exposes TimeMixerConfig (hyperparameters) and TimeMixer (the module). The
+forward pass:
+    (1) RevIN-normalize each window per channel (mean/std over the lookback),
+    (2) build multi-scale views of the input by downsampling along time,
+    (3) mix each scale with Past-Decomposable-Mixing (PDM) blocks,
+    (4) let every scale forecast the horizon and ensemble the forecasts,
+    (5) project to c_out channels and (unless return_targets) RevIN-denormalize.
+
+Used here as a per-ticker forecaster via forecasting/pytorch_runner.py.
+"""
 from __future__ import annotations
 
 import torch

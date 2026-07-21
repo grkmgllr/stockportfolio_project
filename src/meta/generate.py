@@ -55,7 +55,7 @@ def build_meta_dataset(
     if not os.path.exists(csv_path):
         raise FileNotFoundError(
             f"Raw data not found: {csv_path}\n"
-            f"Run: python main.py resample --ticker {ticker} first."
+            f"Run: python main.py fetch --ticker {ticker} first."
         )
     df_raw = pd.read_csv(csv_path).ffill().bfill()
 

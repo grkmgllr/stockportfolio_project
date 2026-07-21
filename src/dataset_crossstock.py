@@ -56,6 +56,25 @@ class CrossStockDataset(Dataset):
         return_targets: bool = True,
         start_date: Optional[str] = "2022-01-01",
     ):
+        """
+        Args:
+            tickers: The stocks to join into each sample (at least 2). They are
+                aligned on the shared trading calendar, so ``num_stocks`` is
+                fixed across every window.
+            root_path: Folder holding the per-ticker ``{ticker}.csv`` files.
+            flag: 'train', 'val', or 'test'.
+            seq_len: Lookback window length.
+            pred_len: Forecast horizon length.
+            input_features: Explicit input columns; None auto-detects the
+                extended set (OHLCV + engineered features) shared by all tickers.
+            target_features: Columns to predict (default: High, Close).
+            scale: Whether to StandardScale inputs (fit per ticker on train only).
+            train_ratio / val_ratio: Time-ordered split fractions.
+            ma_targets: MA columns to also predict (e.g. ['EMA_20', 'SMA_50']).
+            return_targets: If True (default here), targets are per-ticker %
+                returns relative to that ticker's last Close in the input window.
+            start_date: Keep only rows on/after this ISO date (None = all).
+        """
         if not tickers or len(tickers) < 2:
             raise ValueError("CrossStockDataset requires at least 2 tickers")
 
@@ -144,6 +163,16 @@ class CrossStockDataset(Dataset):
     # main assembly
     # ------------------------------------------------------------------
     def _load_data(self):
+        """Load every ticker, align them on a shared calendar, and pack tensors.
+
+        Steps:
+          1. Load each ticker (start_date filter + MA columns) into a dict.
+          2. Resolve one input-feature list valid for all tickers.
+          3. Inner-join the dates so every sample has the same ``num_stocks``.
+          4. Reindex each ticker onto that shared calendar, split by time, and
+             fit a per-ticker scaler on the train slice only (no leakage).
+          5. Pack into ``data_x``/``data_y`` of shape [N, T_split, F].
+        """
         raw = {t: self._load_one(t) for t in self.tickers}
 
         self.input_features = self._resolve_input_features(raw)
@@ -238,6 +267,11 @@ class CrossStockDataset(Dataset):
         return self.data_x.shape[1] - self.seq_len - self.pred_len + 1
 
     def __getitem__(self, index: int):
+        """Return one joint window: seq_x [N, L, F_in], seq_y [N, H, C_out].
+
+        All tickers share the same time window. With return_targets=True, seq_y
+        is each ticker's % return relative to its own anchor (last input Close).
+        """
         s_end = index + self.seq_len
         r_end = s_end + self.pred_len
 
@@ -286,10 +320,12 @@ class CrossStockDataset(Dataset):
 
     @property
     def enc_in(self) -> int:
+        """Number of input features per stock (for model config)."""
         return self.n_input_features
 
     @property
     def c_out(self) -> int:
+        """Number of output (target) features per stock (for model config)."""
         return self.n_target_features
 
     @property

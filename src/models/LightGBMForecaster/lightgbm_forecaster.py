@@ -16,9 +16,10 @@ Architecture
 - **Direct multi-step strategy**: For each (forecast step, target) pair,
   a separate LightGBM regressor is trained.  With ``pred_len=5`` and 4
   targets this produces 20 small models, each training in milliseconds.
-- **Feature engineering**: Converts the raw OHLCV lookback window into
-  ~35-40 scale-invariant tabular features (returns, ratios, RSI, MACD,
-  ATR, Bollinger width, rolling stats, price position).
+- **Feature engineering**: Derives ~28 mostly scale-invariant tabular
+  features from the OHLCV history (returns, ratios, RSI, MACD, ATR,
+  Bollinger width, rolling stats, price position, day-of-week). A few
+  extra features appear only if legacy Vwap/Transactions columns exist.
 - **Output format**: Predictions are shaped ``[N, pred_len, n_targets]``
   in original price scale, identical to the DL models, so the downstream
   meta-labeling pipeline works unchanged.
@@ -33,7 +34,7 @@ Role in the pipeline
                    predictions.npy  (same shape as DL model output)
                           |
                           v
-                   generate_meta_labels.py  (unchanged)
+                   meta/generate.py  (unchanged)
 """
 
 import numpy as np

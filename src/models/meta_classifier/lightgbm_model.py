@@ -21,7 +21,7 @@ Design goals
 
 Role in the pipeline
 --------------------
-    generate_meta_labels.py  -->  meta_labels_{ticker}.csv
+    meta/generate.py  -->  meta_labels_{ticker}.csv
                                         |
                                         v
                                   train_meta.py

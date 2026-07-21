@@ -22,7 +22,7 @@ def get_model_config(model_name: str, seq_len: int, pred_len: int,
     """
     Get model config for stock price prediction.
 
-    Input: OHLCV or OHLCV+Vwap+Transactions (enc_in features)
+    Input: OHLCV + causal engineered features (enc_in features; see features.py)
     Output: High, Close + optional MA targets (c_out features)
 
     denorm_indices maps each output channel to the input channel whose

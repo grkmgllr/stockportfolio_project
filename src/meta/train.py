@@ -32,7 +32,9 @@ FEATURE_COLUMNS = [
     "pred_close_return",
 ]
 
-# Present only when the CSV came from minute-bar resample or with MA targets.
+# Used only when present in the meta-label CSV. Vwap/Transactions are legacy
+# columns from the old Polygon pipeline (daily Yahoo data does not have them);
+# the daily_vol / pred_* columns appear only when the run used MA targets.
 OPTIONAL_FEATURE_COLUMNS = [
     "Vwap",
     "Transactions",

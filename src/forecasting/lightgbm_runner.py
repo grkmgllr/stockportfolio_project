@@ -88,7 +88,7 @@ def evaluate(ticker: str, data_root: str, ma_targets: List[str],
              ) -> Tuple[np.ndarray, np.ndarray, List[str], Dict[str, dict]]:
     """Load a saved forecaster and predict on the test window.
 
-    Slicing matches what generate_meta_labels.py expects:
+    Slicing matches what meta/generate.py expects:
         preds_full[j] corresponds to df row (seq_len + j).
         Test sample i has entry bar (val_end + i + seq_len - 1),
         so j = val_end + i - 1; test predictions start at j = val_end - 1.

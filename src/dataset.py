@@ -77,6 +77,9 @@ class StockDataset(Dataset):
             val_ratio: Ratio of data for validation (default: 0.15)
             ma_targets: List of MA target names to predict (e.g. ['EMA_20', 'SMA_50']).
                         Keys must exist in MA_CONFIGS. Pass None or [] to disable.
+            return_targets: If True, seq_y is the % return of each target relative
+                        to the last Close in the input window (the "anchor"); if
+                        False, seq_y is the standard-scaled absolute price.
             start_date: Filter data to rows on or after this date (default: '2022-01-01').
                         Set to None to use all available data.
         """
@@ -140,7 +143,18 @@ class StockDataset(Dataset):
             raise ValueError(f"Unknown MA method: {method}")
 
     def _load_data(self):
-        """Load and preprocess the stock data."""
+        """Read the ticker CSV and build the sliding-window arrays for this split.
+
+        Steps, in order:
+          1. Read ``{ticker}.csv`` and filter to ``start_date`` onward.
+          2. Forward/back-fill missing values.
+          3. Compute any moving-average target columns from Close, then trim the
+             leading warm-up rows those rolling windows produce.
+          4. Resolve the final input-feature list (auto-detect the extended set).
+          5. Split into train/val/test by time (no shuffle) and fit the scalers
+             on the train split only, so val/test never leak into the statistics.
+          6. Slice the scaled arrays to the current split into ``data_x``/``data_y``.
+        """
         file_path = os.path.join(self.root_path, f"{self.ticker}.csv")
         
         if not os.path.exists(file_path):
@@ -188,8 +202,8 @@ class StockDataset(Dataset):
         ]
         self.target_features = all_targets
         
-        # Auto-detect extended columns (Vwap, Transactions) when no
-        # explicit input_features were provided by the caller.
+        # Auto-detect the extended column set (OHLCV + engineered features)
+        # when no explicit input_features were provided by the caller.
         if self._input_features_override is None:
             has_extended = all(c in df_raw.columns for c in self.EXTENDED_COLUMNS)
             if has_extended:
@@ -229,16 +243,21 @@ class StockDataset(Dataset):
         self.raw_close = df_input.iloc[border1:border2, close_col_idx].values.astype(np.float64)
 
         if self.scale:
-            # fit scaler on train split only to avoid future data leakage
+            # Fit on the train split only (no future leakage), then transform
+            # every row with those train statistics; the split slice happens
+            # afterwards. border1s[0]:border2s[0] is exactly the train range.
             train_x = df_input.iloc[border1s[0]:border2s[0]].values
             self.scaler_x.fit(train_x)
             data_x = self.scaler_x.transform(df_input.values)
 
             if not self.return_targets:
+                # Price-target mode: scale targets the same way as inputs.
                 train_y = df_target.iloc[border1s[0]:border2s[0]].values
                 self.scaler_y.fit(train_y)
                 data_y = self.scaler_y.transform(df_target.values)
             else:
+                # Return-target mode: keep raw prices; __getitem__ turns them
+                # into anchor-relative % returns at read time.
                 data_y = df_target.values.astype(np.float64)
         else:
             data_x = df_input.values
