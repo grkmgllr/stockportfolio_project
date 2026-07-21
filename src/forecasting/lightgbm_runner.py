@@ -1,12 +1,14 @@
 """LightGBM forecaster: train and evaluate one ticker's price predictions."""
+from __future__ import annotations
 
 import os
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
 from models.LightGBMForecaster import LightGBMForecaster
 from paths import CHECKPOINTS_ROOT, forecaster_checkpoint
+from utils import calculate_return_metrics
 
 from forecasting.data_loading import load_raw_df
 
@@ -80,13 +82,18 @@ def train_pooled(tickers: List[str], data_root: str, ma_targets: List[str],
 def evaluate(ticker: str, data_root: str, ma_targets: List[str],
              seq_len: int, pred_len: int,
              checkpoint_override: str | None = None
-             ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+             ) -> Tuple[np.ndarray, np.ndarray, List[str], Dict[str, dict]]:
     """Load a saved forecaster and predict on the test window.
 
     Slicing matches what generate_meta_labels.py expects:
         preds_full[j] corresponds to df row (seq_len + j).
         Test sample i has entry bar (val_end + i + seq_len - 1),
         so j = val_end + i - 1; test predictions start at j = val_end - 1.
+
+    Returns ``(preds, trues, target_features, eval_results)`` — mirroring
+    ``pytorch_runner.evaluate``. ``eval_results`` holds the return-based
+    IC / RIC / DA metrics (overall and per target), reconstructed from the
+    per-sample anchor Close so they match the return-space the model fits on.
     """
     df, _train_end, val_end, _target_features = load_raw_df(
         ticker, data_root, ma_targets,
@@ -103,4 +110,20 @@ def evaluate(ticker: str, data_root: str, ma_targets: List[str],
     preds = preds_full[test_start:test_start + n_test]
     trues = trues_full[test_start:test_start + n_test]
 
-    return preds, trues, forecaster.target_features
+    # Reconstruct returns relative to each sample's anchor Close — the exact
+    # alignment predict() uses: anchor = Close[seq_len : len(df) - pred_len].
+    anchor_full = df["Close"].values[
+        forecaster.seq_len: len(df) - forecaster.pred_len
+    ]
+    anchor = anchor_full[test_start:test_start + n_test][:, None, None]
+    pred_returns = (preds - anchor) / anchor
+    true_returns = (trues - anchor) / anchor
+
+    target_features = forecaster.target_features
+    eval_results = {"overall_returns": calculate_return_metrics(pred_returns, true_returns)}
+    for i, name in enumerate(target_features):
+        eval_results[f"{name}_returns"] = calculate_return_metrics(
+            pred_returns[:, :, i], true_returns[:, :, i],
+        )
+
+    return preds, trues, target_features, eval_results

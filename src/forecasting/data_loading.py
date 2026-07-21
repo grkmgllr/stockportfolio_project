@@ -19,7 +19,7 @@ def load_raw_df(ticker: str, data_root: str, ma_targets: List[str],
     if not os.path.exists(csv_path):
         raise FileNotFoundError(
             f"Data file not found: {csv_path}\n"
-            f"Run resample_parquet.py or fetch_data.py first."
+            f"Run: python src/scripts/fetch_data.py first."
         )
 
     df = pd.read_csv(csv_path).ffill().bfill()

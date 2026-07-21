@@ -1,4 +1,5 @@
 """PyTorch forecaster (TimeMixer / TimesNet): full train and evaluate flows."""
+from __future__ import annotations
 
 import os
 import time
@@ -85,7 +86,7 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
     train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size,
                               shuffle=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=train_cfg.batch_size,
-                            shuffle=False, drop_last=True)
+                            shuffle=False, drop_last=False)
 
     print(f"\nTrain samples: {len(train_dataset)}")
     if len(tickers) > 1:

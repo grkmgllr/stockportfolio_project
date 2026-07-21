@@ -4,6 +4,8 @@ Adding a new forecaster: extend the two dispatch functions here and it
 becomes visible to both training and evaluation without touching them.
 """
 
+from __future__ import annotations
+
 from models import (
     TimeMixer, TimeMixerConfig,
     TimesNetModel, TimesNetConfig,

@@ -1,9 +1,13 @@
 """
-Parquet Dataset for stock price forecasting.
+Dataset for stock price forecasting.
 
-Input: OHLCV + optional Vwap/Transactions (5-7 features)
+Input: OHLCV + optional engineered features (see features.py; 5 or 13 cols)
 Output: High, Close + optional moving average predictions
+
+Reads per-ticker CSVs produced by scripts/fetch_data.py (Yahoo Finance).
 """
+from __future__ import annotations
+
 import torch
 from torch.utils.data import Dataset
 import pandas as pd
@@ -11,6 +15,8 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 import os
 from typing import Dict, List, Optional, Literal
+
+from features import FEATURE_COLUMNS
 
 
 class ParquetDataset(Dataset):
@@ -31,7 +37,9 @@ class ParquetDataset(Dataset):
     """
     
     OHLCV_COLUMNS = ['Open', 'High', 'Low', 'Close', 'Volume']
-    EXTENDED_COLUMNS = ['Open', 'High', 'Low', 'Close', 'Volume', 'Vwap', 'Transactions']
+    # Extended input = raw OHLCV + causal engineered features (see features.py).
+    # Replaces the Polygon-era Vwap/Transactions, which daily Yahoo data lacks.
+    EXTENDED_COLUMNS = OHLCV_COLUMNS + list(FEATURE_COLUMNS)
     DEFAULT_TARGETS = ['High', 'Close']
     
     MA_CONFIGS: Dict[str, dict] = {
@@ -138,8 +146,7 @@ class ParquetDataset(Dataset):
         if not os.path.exists(file_path):
             raise FileNotFoundError(
                 f"Data file not found: {file_path}\n"
-                f"Run: python scripts/fetch_data.py or "
-                f"python scripts/resample_parquet.py to prepare data first."
+                f"Run: python src/scripts/fetch_data.py to prepare data first."
             )
         
         df_raw = pd.read_csv(file_path)

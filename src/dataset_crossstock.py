@@ -98,7 +98,7 @@ class CrossStockDataset(Dataset):
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"Data file not found: {path}\n"
-                f"Run resample_parquet.py or fetch_data.py first."
+                f"Run: python src/scripts/fetch_data.py first."
             )
 
         df = pd.read_csv(path)

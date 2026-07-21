@@ -9,6 +9,8 @@ to display seed uncertainty in ablation figures.
 If no seeded runs are found, falls back to the single-seed layout under
 `results/ablation/md{M}/{TICKER}/`.
 """
+from __future__ import annotations
+
 import json
 import re
 from pathlib import Path

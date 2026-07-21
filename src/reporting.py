@@ -4,6 +4,8 @@ Kept separate from compute so metric-producing code stays testable
 (it returns dicts) and formatting can evolve independently.
 """
 
+from __future__ import annotations
+
 import json
 import os
 from datetime import datetime

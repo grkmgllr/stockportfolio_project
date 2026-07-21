@@ -5,8 +5,8 @@ This module is a thin CLI dispatcher — every command's real work lives
 under ``src/forecasting/``, ``src/meta/``, or ``src/reporting.py``.
 
 Usage:
-    python main.py resample --ticker AAPL
-    python main.py resample --all
+    python main.py fetch --ticker AAPL
+    python main.py fetch --all
     python main.py train --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META
     python main.py test  --model TimeMixer --ticker  AAPL
     python main.py meta-label --ticker AAPL --model TimeMixer
@@ -42,32 +42,12 @@ ALL_TICKERS = ["AAPL", "NVDA", "META", "GOOGL", "MSFT"]
 # Subcommands
 # ─────────────────────────────────────────────────────────────────────
 
-def cmd_resample(args):
-    """Resample minute-bar parquet files to daily CSVs in data/raw/."""
-    import pandas as pd
-    from scripts.resample_parquet import find_parquet_file, resample_minute_to_daily
+def cmd_fetch(args):
+    """Download daily OHLCV + features from Yahoo Finance into data/raw/."""
+    from scripts.fetch_data import DEFAULT_UNIVERSE, fetch_universe
 
-    tickers = ALL_TICKERS if args.all else [args.ticker]
-    for ticker in tickers:
-        print(f"\n{'=' * 60}")
-        print(f"  Resampling {ticker} (start_date={args.start_date})")
-        print(f"{'=' * 60}")
-
-        try:
-            parquet_path = find_parquet_file(args.data_root, ticker)
-        except FileNotFoundError as e:
-            print(f"  SKIP: {e}")
-            continue
-
-        df_raw = pd.read_parquet(parquet_path)
-        print(f"  Loaded {len(df_raw):,} minute bars")
-        df_daily = resample_minute_to_daily(df_raw, start_date=args.start_date)
-
-        out_path = os.path.join(args.data_root, f"{ticker}.csv")
-        df_daily.to_csv(out_path, index=False)
-        print(f"  -> {len(df_daily)} daily bars saved to {out_path}")
-
-    print("\nResample complete.")
+    tickers = DEFAULT_UNIVERSE if args.all else (args.tickers or [args.ticker])
+    fetch_universe(tickers, start=args.start, end=args.end)
 
 
 def cmd_train(args):
@@ -129,8 +109,10 @@ def cmd_test(args):
 
     checkpoint_override = None
     if is_pooled:
+        # LightGBM serialises to joblib; the neural models to .pt
+        ext = "joblib" if model_name == "LightGBM" else "pt"
         checkpoint_override = os.path.join(
-            CHECKPOINTS_ROOT, f"pooled_{model_name}_best.pt",
+            CHECKPOINTS_ROOT, f"pooled_{model_name}_best.{ext}",
         )
 
     # Cross-stock models score every ticker in one forward pass, so we
@@ -163,9 +145,10 @@ def cmd_test(args):
 
         eval_results = None
         if model_name == "LightGBM":
-            preds, trues, target_names = lightgbm_runner.evaluate(
+            preds, trues, target_names, eval_results = lightgbm_runner.evaluate(
                 ticker, args.data_root, ma_targets,
                 seq_len=args.seq_len, pred_len=args.pred_len,
+                checkpoint_override=checkpoint_override,
             )
         elif model_name == "StockMixer":
             preds, trues, target_names, eval_results = crossstock_results[ticker]
@@ -288,12 +271,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", help="Pipeline commands")
 
-    # --- resample ---
-    p_resample = subparsers.add_parser("resample", help="Resample minute bars to daily")
-    p_resample.add_argument("--ticker", type=str, default="AAPL")
-    p_resample.add_argument("--all", action="store_true", help="Resample all tickers")
-    p_resample.add_argument("--start_date", type=str, default="2015-10-01")
-    p_resample.add_argument("--data_root", type=str, default=DATA_ROOT)
+    # --- fetch ---
+    p_fetch = subparsers.add_parser("fetch", help="Download daily OHLCV + features from Yahoo Finance")
+    p_fetch.add_argument("--ticker", type=str, default="AAPL")
+    p_fetch.add_argument("--tickers", nargs="+", default=None,
+                         help="Explicit ticker list (e.g. AAPL MSFT GOOGL)")
+    p_fetch.add_argument("--all", action="store_true",
+                         help="Fetch the full starter universe (see fetch_data.DEFAULT_UNIVERSE)")
+    p_fetch.add_argument("--start", type=str, default="2015-01-01")
+    p_fetch.add_argument("--end", type=str, default="2025-11-30")
 
     # --- shared args for model commands ---
     def add_common_args(p):
@@ -392,7 +378,7 @@ def main():
         return
 
     commands = {
-        "resample": cmd_resample,
+        "fetch": cmd_fetch,
         "train": cmd_train,
         "test": cmd_test,
         "meta-label": cmd_meta_label,
