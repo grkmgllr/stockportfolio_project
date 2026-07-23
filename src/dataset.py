@@ -62,6 +62,9 @@ class StockDataset(Dataset):
         ma_targets: Optional[List[str]] = None,
         return_targets: bool = False,
         start_date: Optional[str] = "2022-01-01",
+        end_date: Optional[str] = None,
+        train_end_date: Optional[str] = None,
+        val_end_date: Optional[str] = None,
     ):
         """
         Args:
@@ -82,6 +85,14 @@ class StockDataset(Dataset):
                         False, seq_y is the standard-scaled absolute price.
             start_date: Filter data to rows on or after this date (default: '2022-01-01').
                         Set to None to use all available data.
+            end_date: Optional upper bound; keeps rows strictly on or before it.
+                        Used by walk-forward folds to cap each fold's window.
+            train_end_date / val_end_date: Optional explicit, date-based split
+                        boundaries. When BOTH are given they replace
+                        train_ratio/val_ratio: train is everything up to
+                        train_end_date, val runs to val_end_date, and test is
+                        whatever remains. This is what walk-forward evaluation
+                        uses so each fold tests on a distinct calendar period.
         """
         self.ticker = ticker
         self.root_path = root_path
@@ -91,7 +102,10 @@ class StockDataset(Dataset):
         self.scale = scale
         self.return_targets = return_targets
         self.start_date = start_date
-        
+        self.end_date = end_date
+        self.train_end_date = train_end_date
+        self.val_end_date = val_end_date
+
         # Default features (resolved in _load_data after reading the CSV)
         self._input_features_override = input_features
         self.input_features = input_features or self.OHLCV_COLUMNS.copy()
@@ -165,13 +179,15 @@ class StockDataset(Dataset):
         
         df_raw = pd.read_csv(file_path)
 
-        # Filter by start_date if specified
+        # Filter by start_date / end_date if specified
         if self.start_date and 'Date' in df_raw.columns:
             n_before = len(df_raw)
             df_raw = df_raw[df_raw['Date'] >= self.start_date].reset_index(drop=True)
             if self.flag == 'train' and n_before != len(df_raw):
                 print(f"[{self.ticker}] Filtered to {self.start_date}+: "
                       f"{n_before} → {len(df_raw)} rows")
+        if self.end_date and 'Date' in df_raw.columns:
+            df_raw = df_raw[df_raw['Date'] <= self.end_date].reset_index(drop=True)
 
         # Handle missing values with forward fill then backward fill
         df_raw = df_raw.ffill().bfill()
@@ -227,10 +243,16 @@ class StockDataset(Dataset):
         # Extract target features (High, Close + optional MAs)
         df_target = df_raw[self.target_features].copy()
         
-        # time-ordered split boundaries
+        # Time-ordered split boundaries. Explicit dates (walk-forward) take
+        # precedence; otherwise fall back to the ratio-based split.
         total_len = len(df_input)
-        train_end = int(total_len * self.train_ratio)
-        val_end = int(total_len * (self.train_ratio + self.val_ratio))
+        if self.train_end_date and self.val_end_date and 'Date' in df_raw.columns:
+            dates = df_raw['Date'].values
+            train_end = int((dates <= self.train_end_date).sum())
+            val_end = int((dates <= self.val_end_date).sum())
+        else:
+            train_end = int(total_len * self.train_ratio)
+            val_end = int(total_len * (self.train_ratio + self.val_ratio))
 
         border1s = [0, train_end, val_end]
         border2s = [train_end, val_end, total_len]

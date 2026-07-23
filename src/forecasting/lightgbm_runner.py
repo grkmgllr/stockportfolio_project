@@ -16,10 +16,14 @@ from forecasting.data_loading import load_raw_df
 def train_one(ticker: str, data_root: str, ma_targets: List[str],
               seq_len: int, pred_len: int,
               patience: int = 30,
-              start_date: str | None = None) -> LightGBMForecaster:
+              start_date: str | None = None,
+              end_date: str | None = None,
+              train_end_date: str | None = None,
+              val_end_date: str | None = None) -> LightGBMForecaster:
     """Fit a LightGBM forecaster for a single ticker and save the checkpoint."""
     df, train_end, val_end, target_features = load_raw_df(
         ticker, data_root, ma_targets, start_date=start_date,
+        end_date=end_date, train_end_date=train_end_date, val_end_date=val_end_date,
     )
     df_train = df.iloc[:train_end].copy()
     df_val = df.iloc[train_end:val_end].copy()
@@ -47,7 +51,10 @@ def train_one(ticker: str, data_root: str, ma_targets: List[str],
 def train_pooled(tickers: List[str], data_root: str, ma_targets: List[str],
                  seq_len: int, pred_len: int,
                  patience: int = 30,
-                 start_date: str | None = None) -> LightGBMForecaster:
+                 start_date: str | None = None,
+                 end_date: str | None = None,
+                 train_end_date: str | None = None,
+                 val_end_date: str | None = None) -> LightGBMForecaster:
     """Train one LightGBM model on many tickers without cross-ticker leakage.
 
     Each ticker's (X, y) arrays are built inside its own frame — feature
@@ -59,7 +66,10 @@ def train_pooled(tickers: List[str], data_root: str, ma_targets: List[str],
     train_dfs, val_dfs = [], []
     target_features = None
     for t in tickers:
-        df, train_end, val_end, tf = load_raw_df(t, data_root, ma_targets, start_date=start_date)
+        df, train_end, val_end, tf = load_raw_df(
+            t, data_root, ma_targets, start_date=start_date, end_date=end_date,
+            train_end_date=train_end_date, val_end_date=val_end_date,
+        )
         train_dfs.append(df.iloc[:train_end].copy())
         val_dfs.append(df.iloc[train_end:val_end].copy())
         target_features = target_features or tf
@@ -84,7 +94,10 @@ def train_pooled(tickers: List[str], data_root: str, ma_targets: List[str],
 def evaluate(ticker: str, data_root: str, ma_targets: List[str],
              seq_len: int, pred_len: int,
              checkpoint_override: str | None = None,
-             start_date: str | None = None
+             start_date: str | None = None,
+             end_date: str | None = None,
+             train_end_date: str | None = None,
+             val_end_date: str | None = None
              ) -> Tuple[np.ndarray, np.ndarray, List[str], Dict[str, dict]]:
     """Load a saved forecaster and predict on the test window.
 
@@ -100,6 +113,7 @@ def evaluate(ticker: str, data_root: str, ma_targets: List[str],
     """
     df, _train_end, val_end, _target_features = load_raw_df(
         ticker, data_root, ma_targets, start_date=start_date,
+        end_date=end_date, train_end_date=train_end_date, val_end_date=val_end_date,
     )
 
     checkpoint_path = checkpoint_override or forecaster_checkpoint(ticker, "LightGBM")

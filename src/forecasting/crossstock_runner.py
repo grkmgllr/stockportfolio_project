@@ -134,6 +134,9 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
           market_dim: int = 2,
           seed: int = 42,
           start_date: str | None = "2022-01-01",
+          end_date: str | None = None,
+          train_end_date: str | None = None,
+          val_end_date: str | None = None,
           device: str | None = None,
           checkpoint_dir: str = CHECKPOINTS_ROOT) -> str:
     """Train a cross-stock model on a joint CrossStockDataset.
@@ -166,15 +169,19 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
 
     print("Loading Data...")
+    split_kw = dict(
+        start_date=start_date, end_date=end_date,
+        train_end_date=train_end_date, val_end_date=val_end_date,
+    )
     train_ds = CrossStockDataset(
         tickers=tickers, root_path=data_root, flag="train",
         seq_len=seq_len, pred_len=pred_len,
-        ma_targets=ma_targets, return_targets=True, start_date=start_date,
+        ma_targets=ma_targets, return_targets=True, **split_kw,
     )
     val_ds = CrossStockDataset(
         tickers=tickers, root_path=data_root, flag="val",
         seq_len=seq_len, pred_len=pred_len,
-        ma_targets=ma_targets, return_targets=True, start_date=start_date,
+        ma_targets=ma_targets, return_targets=True, **split_kw,
     )
 
     model_cfg = get_model_config(
@@ -258,6 +265,9 @@ def evaluate(tickers: List[str], model_name: str, ma_targets: List[str],
              market_dim: int = 2,
              checkpoint_override: str | None = None,
              start_date: str | None = "2022-01-01",
+             end_date: str | None = None,
+             train_end_date: str | None = None,
+             val_end_date: str | None = None,
              device: str | None = None,
              checkpoint_dir: str = CHECKPOINTS_ROOT,
              ) -> Dict[str, Tuple[np.ndarray, np.ndarray, List[str], dict]]:
@@ -273,6 +283,7 @@ def evaluate(tickers: List[str], model_name: str, ma_targets: List[str],
         tickers=tickers, root_path=data_root, flag="test",
         seq_len=seq_len, pred_len=pred_len,
         ma_targets=ma_targets, return_targets=True, start_date=start_date,
+        end_date=end_date, train_end_date=train_end_date, val_end_date=val_end_date,
     )
     loader = DataLoader(test_ds, batch_size=batch_size,
                         shuffle=False, drop_last=False)

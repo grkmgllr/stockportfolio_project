@@ -53,19 +53,25 @@ def cmd_train(args):
 
     tickers = args.tickers if getattr(args, "tickers", None) else [args.ticker]
     ma_targets = args.ma_targets or []
+    # Walk-forward folds set these; a normal run leaves them None (ratio split).
+    fold_kw = dict(
+        end_date=getattr(args, "end_date", None),
+        train_end_date=getattr(args, "train_end_date", None),
+        val_end_date=getattr(args, "val_end_date", None),
+    )
 
     if args.model == "LightGBM":
         if len(tickers) > 1:
             lightgbm_runner.train_pooled(
                 tickers, args.data_root, ma_targets,
                 seq_len=args.seq_len, pred_len=args.pred_len,
-                patience=args.patience, start_date=args.start_date,
+                patience=args.patience, start_date=args.start_date, **fold_kw,
             )
         else:
             lightgbm_runner.train_one(
                 tickers[0], args.data_root, ma_targets,
                 seq_len=args.seq_len, pred_len=args.pred_len,
-                patience=args.patience, start_date=args.start_date,
+                patience=args.patience, start_date=args.start_date, **fold_kw,
             )
     elif args.model == "StockMixer":
         # Cross-stock model — jointly trained on all tickers at once.
@@ -83,7 +89,7 @@ def cmd_train(args):
             alpha=getattr(args, "alpha", 0.1),
             market_dim=getattr(args, "market_dim", 2),
             seed=getattr(args, "seed", 42),
-            data_root=args.data_root, start_date=args.start_date,
+            data_root=args.data_root, start_date=args.start_date, **fold_kw,
         )
     else:
         pytorch_runner.train(
@@ -91,7 +97,7 @@ def cmd_train(args):
             seq_len=args.seq_len, pred_len=args.pred_len,
             epochs=args.epochs, batch_size=args.batch_size,
             lr=args.lr, patience=args.patience,
-            data_root=args.data_root, start_date=args.start_date,
+            data_root=args.data_root, start_date=args.start_date, **fold_kw,
         )
 
 
@@ -103,6 +109,11 @@ def cmd_test(args):
     model_name = args.model
     ma_targets = args.ma_targets or []
     is_pooled = len(tickers) > 1
+    fold_kw = dict(
+        end_date=getattr(args, "end_date", None),
+        train_end_date=getattr(args, "train_end_date", None),
+        val_end_date=getattr(args, "val_end_date", None),
+    )
 
     checkpoint_override = None
     if is_pooled:
@@ -131,7 +142,7 @@ def cmd_test(args):
             batch_size=args.batch_size, data_root=args.data_root,
             market_dim=getattr(args, "market_dim", 2),
             checkpoint_override=checkpoint_override,
-            start_date=args.start_date,
+            start_date=args.start_date, **fold_kw,
         )
 
     all_results = {}
@@ -147,7 +158,7 @@ def cmd_test(args):
                 ticker, args.data_root, ma_targets,
                 seq_len=args.seq_len, pred_len=args.pred_len,
                 checkpoint_override=checkpoint_override,
-                start_date=args.start_date,
+                start_date=args.start_date, **fold_kw,
             )
         elif model_name == "StockMixer":
             preds, trues, target_names, eval_results = crossstock_results[ticker]
@@ -157,7 +168,7 @@ def cmd_test(args):
                 seq_len=args.seq_len, pred_len=args.pred_len,
                 batch_size=args.batch_size, data_root=args.data_root,
                 checkpoint_override=checkpoint_override,
-                start_date=args.start_date,
+                start_date=args.start_date, **fold_kw,
             )
 
         results = {"overall": calculate_metrics(preds, trues)}
@@ -260,6 +271,134 @@ def cmd_run_all(args):
     print(f"{'#' * 60}")
 
 
+def _build_folds(dates, n_folds: int, test_size: int):
+    """Cut the tail of the calendar into consecutive, non-overlapping folds.
+
+    Fold k tests on its own block of ``test_size`` trading days; the block
+    immediately before it is that fold's validation set, and everything
+    earlier is training (so the train window expands with each fold).
+    Returns a list of {train_end_date, val_end_date, end_date} dicts.
+    """
+    n = len(dates)
+    folds = []
+    for k in range(n_folds):
+        test_start = n - (n_folds - k) * test_size
+        test_end = test_start + test_size
+        val_start = test_start - test_size
+        folds.append({
+            "fold": k + 1,
+            "train_end_date": dates[val_start - 1],
+            "val_end_date": dates[test_start - 1],
+            "end_date": dates[test_end - 1],
+        })
+    return folds
+
+
+def cmd_walkforward(args):
+    """Re-run train+test over several sequential folds and report mean ± std.
+
+    A single 70/15/15 split leaves one short test window, so differences
+    between models sit well inside the noise band. Walk-forward repeats the
+    full train/test cycle on consecutive test periods with an expanding train
+    window, which is what makes a model comparison credible.
+    """
+    import copy
+    import pandas as pd
+
+    tickers = args.tickers if getattr(args, "tickers", None) else [args.ticker]
+
+    csv_path = os.path.join(args.data_root, f"{tickers[0]}.csv")
+    if not os.path.exists(csv_path):
+        raise SystemExit(
+            f"Data not found: {csv_path}\nRun `python main.py fetch` first."
+        )
+    dates = pd.read_csv(csv_path)["Date"].tolist()
+    if args.start_date:
+        dates = [d for d in dates if d >= args.start_date]
+
+    # Each fold consumes one test block; the earliest fold also needs a
+    # validation block plus enough history to form a window.
+    needed = (args.folds + 1) * args.test_size + args.seq_len + args.pred_len
+    if len(dates) < needed:
+        raise SystemExit(
+            f"Not enough data: {len(dates)} rows but {args.folds} folds of "
+            f"--test_size {args.test_size} need ~{needed}. Use fewer folds, a "
+            f"smaller --test_size, or an earlier --start_date."
+        )
+
+    folds = _build_folds(dates, args.folds, args.test_size)
+
+    print(f"\n{'#' * 64}")
+    print(f"  WALK-FORWARD — {args.model} | {len(tickers)} ticker(s) | "
+          f"{args.folds} folds x {args.test_size} days")
+    print(f"{'#' * 64}")
+
+    per_fold = []
+    for f in folds:
+        print(f"\n{'=' * 64}")
+        print(f"  Fold {f['fold']}/{args.folds}  "
+              f"train<={f['train_end_date']}  val<={f['val_end_date']}  "
+              f"test<={f['end_date']}")
+        print(f"{'=' * 64}")
+
+        a = copy.copy(args)
+        a.train_end_date = f["train_end_date"]
+        a.val_end_date = f["val_end_date"]
+        a.end_date = f["end_date"]
+
+        cmd_train(a)
+        per_fold.append(cmd_test(a))
+
+    _print_walkforward_summary(args, tickers, folds, per_fold)
+    return per_fold
+
+
+def _print_walkforward_summary(args, tickers, folds, per_fold):
+    """Aggregate per-fold metrics into mean ± std, per ticker and overall."""
+    def collect(ticker, section, key):
+        vals = []
+        for res in per_fold:
+            block = res.get(ticker, {}).get(section, {})
+            if key in block and np.isfinite(block[key]):
+                vals.append(block[key])
+        return np.array(vals, dtype=float)
+
+    print(f"\n{'#' * 64}")
+    print(f"  WALK-FORWARD SUMMARY — {args.model}  "
+          f"({len(folds)} folds, mean ± std)")
+    print(f"{'#' * 64}")
+    print(f"{'Ticker':8} {'MAE $':>16} {'IC':>16} {'DA %':>16}")
+    print("-" * 64)
+
+    macro = {"MAE": [], "IC": [], "DA": []}
+    for t in tickers:
+        mae = collect(t, "overall", "MAE")
+        ic = collect(t, "overall_returns", "IC")
+        da = collect(t, "overall_returns", "DA")
+        for name, arr in (("MAE", mae), ("IC", ic), ("DA", da)):
+            if arr.size:
+                macro[name].append(arr.mean())
+
+        def fmt(arr, scale=1.0, prec=2):
+            if not arr.size:
+                return f"{'—':>16}"
+            return f"{arr.mean() * scale:>9.{prec}f} ±{arr.std() * scale:<5.{prec}f}"
+
+        print(f"{t:8} {fmt(mae)} {fmt(ic, prec=3)} {fmt(da, 100.0, prec=1)}")
+
+    print("-" * 64)
+    parts = []
+    for name, scale, prec in (("MAE", 1.0, 2), ("IC", 1.0, 3), ("DA", 100.0, 1)):
+        vals = np.array(macro[name], dtype=float)
+        parts.append(f"{vals.mean() * scale:>9.{prec}f} {'':6}" if vals.size
+                     else f"{'—':>16}")
+    print(f"{'MACRO':8} " + " ".join(parts))
+    print(f"{'#' * 64}\n")
+
+    print("Note: the ± values are the spread across folds. Treat a difference "
+          "between two models as real only if it is clearly larger than this.")
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Argument parsing
 # ─────────────────────────────────────────────────────────────────────
@@ -323,6 +462,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_test.add_argument("--market_dim", type=int, default=2,
                         help="Must match the value used at train time (StockMixer only).")
 
+    # --- walkforward ---
+    p_wf = subparsers.add_parser(
+        "walkforward",
+        help="Train+test over several sequential folds and report mean ± std",
+    )
+    add_common_args(p_wf)
+    p_wf.add_argument("--folds", type=int, default=4,
+                      help="Number of consecutive test periods (default 4).")
+    p_wf.add_argument("--test_size", type=int, default=126,
+                      help="Trading days per test (and val) block; 126 ~ 6 months.")
+    p_wf.add_argument("--epochs", type=int, default=200)
+    p_wf.add_argument("--batch_size", type=int, default=32)
+    p_wf.add_argument("--lr", type=float, default=2e-4)
+    p_wf.add_argument("--patience", type=int, default=30)
+    p_wf.add_argument("--alpha", type=float, default=0.1)
+    p_wf.add_argument("--market_dim", type=int, default=2)
+    p_wf.add_argument("--seed", type=int, default=42)
+
     # --- meta-label ---
     p_meta = subparsers.add_parser("meta-label", help="Generate triple-barrier meta-labels")
     p_meta.add_argument("--ticker", type=str, default="AAPL")
@@ -384,6 +541,7 @@ def main():
     commands = {
         "fetch": cmd_fetch,
         "train": cmd_train,
+        "walkforward": cmd_walkforward,
         "test": cmd_test,
         "meta-label": cmd_meta_label,
         "train-meta": cmd_train_meta,

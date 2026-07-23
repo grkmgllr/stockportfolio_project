@@ -55,6 +55,9 @@ class CrossStockDataset(Dataset):
         ma_targets: Optional[List[str]] = None,
         return_targets: bool = True,
         start_date: Optional[str] = "2022-01-01",
+        end_date: Optional[str] = None,
+        train_end_date: Optional[str] = None,
+        val_end_date: Optional[str] = None,
     ):
         """
         Args:
@@ -74,6 +77,10 @@ class CrossStockDataset(Dataset):
             return_targets: If True (default here), targets are per-ticker %
                 returns relative to that ticker's last Close in the input window.
             start_date: Keep only rows on/after this ISO date (None = all).
+            end_date: Optional upper bound on the date range (walk-forward folds).
+            train_end_date / val_end_date: Optional explicit date-based split
+                boundaries; when both are given they replace train_ratio/val_ratio
+                so each walk-forward fold tests a distinct calendar period.
         """
         if not tickers or len(tickers) < 2:
             raise ValueError("CrossStockDataset requires at least 2 tickers")
@@ -86,6 +93,9 @@ class CrossStockDataset(Dataset):
         self.scale = scale
         self.return_targets = return_targets
         self.start_date = start_date
+        self.end_date = end_date
+        self.train_end_date = train_end_date
+        self.val_end_date = val_end_date
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
 
@@ -126,6 +136,8 @@ class CrossStockDataset(Dataset):
 
         if self.start_date:
             df = df[df['Date'] >= self.start_date].reset_index(drop=True)
+        if self.end_date:
+            df = df[df['Date'] <= self.end_date].reset_index(drop=True)
 
         df = df.ffill().bfill()
 
@@ -211,9 +223,14 @@ class CrossStockDataset(Dataset):
         F_in = len(self.input_features)
         C_out = len(self.target_features)
 
+        # Explicit date-based boundaries (walk-forward) win over the ratios.
         total_len = T
-        train_end = int(total_len * self.train_ratio)
-        val_end = int(total_len * (self.train_ratio + self.val_ratio))
+        if self.train_end_date and self.val_end_date:
+            train_end = sum(1 for d in common_dates if d <= self.train_end_date)
+            val_end = sum(1 for d in common_dates if d <= self.val_end_date)
+        else:
+            train_end = int(total_len * self.train_ratio)
+            val_end = int(total_len * (self.train_ratio + self.val_ratio))
         border1s = [0, train_end, val_end]
         border2s = [train_end, val_end, total_len]
         border1, border2 = border1s[self.set_type], border2s[self.set_type]

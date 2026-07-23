@@ -25,6 +25,9 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
           epochs: int, batch_size: int, lr: float,
           patience: int, data_root: str,
           start_date: str | None = "2022-01-01",
+          end_date: str | None = None,
+          train_end_date: str | None = None,
+          val_end_date: str | None = None,
           device: str | None = None,
           checkpoint_dir: str = CHECKPOINTS_ROOT) -> str:
     """Train a PyTorch forecaster (optionally on pooled tickers).
@@ -53,15 +56,19 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
     print("Loading Data...")
     train_datasets, val_datasets = [], []
     for t in tickers:
+        split_kw = dict(
+            start_date=start_date, end_date=end_date,
+            train_end_date=train_end_date, val_end_date=val_end_date,
+        )
         train_datasets.append(StockDataset(
             ticker=t, root_path=train_cfg.data_root, flag="train",
             seq_len=train_cfg.seq_len, pred_len=train_cfg.pred_len,
-            ma_targets=ma_targets, return_targets=True, start_date=start_date,
+            ma_targets=ma_targets, return_targets=True, **split_kw,
         ))
         val_datasets.append(StockDataset(
             ticker=t, root_path=train_cfg.data_root, flag="val",
             seq_len=train_cfg.seq_len, pred_len=train_cfg.pred_len,
-            ma_targets=ma_targets, return_targets=True, start_date=start_date,
+            ma_targets=ma_targets, return_targets=True, **split_kw,
         ))
 
     if len(tickers) > 1:
@@ -159,6 +166,9 @@ def evaluate(ticker: str, model_name: str, ma_targets: List[str],
              batch_size: int, data_root: str,
              checkpoint_override: str | None = None,
              start_date: str | None = "2022-01-01",
+             end_date: str | None = None,
+             train_end_date: str | None = None,
+             val_end_date: str | None = None,
              device: str | None = None,
              checkpoint_dir: str = CHECKPOINTS_ROOT
              ) -> Tuple[np.ndarray, np.ndarray, List[str], dict]:
@@ -167,6 +177,7 @@ def evaluate(ticker: str, model_name: str, ma_targets: List[str],
         ticker=ticker, root_path=data_root, flag="test",
         seq_len=seq_len, pred_len=pred_len,
         ma_targets=ma_targets, return_targets=True, start_date=start_date,
+        end_date=end_date, train_end_date=train_end_date, val_end_date=val_end_date,
     )
     test_loader = DataLoader(test_dataset, batch_size=batch_size,
                              shuffle=False, drop_last=False)
