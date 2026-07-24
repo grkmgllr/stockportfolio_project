@@ -41,9 +41,16 @@ from utils import calculate_metrics
 
 def cmd_fetch(args):
     """Download daily OHLCV + features from Yahoo Finance into data/raw/."""
-    from scripts.fetch_data import DEFAULT_UNIVERSE, fetch_universe
+    from scripts.fetch_data import UNIVERSES, fetch_universe
 
-    tickers = DEFAULT_UNIVERSE if args.all else (args.tickers or [args.ticker])
+    if args.tickers:
+        tickers = args.tickers
+    elif getattr(args, "universe", None):
+        tickers = UNIVERSES[args.universe]
+    elif args.all:
+        tickers = UNIVERSES["starter"]
+    else:
+        tickers = [args.ticker]
     fetch_universe(tickers, start=args.start, end=args.end)
 
 
@@ -416,7 +423,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--tickers", nargs="+", default=None,
                          help="Explicit ticker list (e.g. AAPL MSFT GOOGL)")
     p_fetch.add_argument("--all", action="store_true",
-                         help="Fetch the full starter universe (see fetch_data.DEFAULT_UNIVERSE)")
+                         help="Fetch the full starter universe (see fetch_data.STARTER_UNIVERSE)")
+    p_fetch.add_argument("--universe", choices=["starter", "ndx100"], default=None,
+                         help="Named universe to fetch: 'starter' (15) or 'ndx100' (~100).")
     p_fetch.add_argument("--start", type=str, default="2015-01-01")
     p_fetch.add_argument("--end", type=str, default="2025-11-30")
 

@@ -33,11 +33,34 @@ from features import FEATURE_COLUMNS, add_features  # noqa: E402
 RAW_DATA_DIR = "data/raw"
 
 # Small starter universe — validate the pipeline here, expand later.
-DEFAULT_UNIVERSE: List[str] = [
+STARTER_UNIVERSE: List[str] = [
     "AAPL", "MSFT", "AMZN", "GOOGL", "META",
     "NVDA", "TSLA", "AMD", "AVGO", "NFLX",
     "JPM", "BAC", "V", "MA", "COST",
 ]
+
+# Nasdaq-100 constituents (approximate, point-in-time). Index membership
+# changes over time, so a few of these may be stale; fetch_universe simply
+# skips any ticker Yahoo has no data for, so an imperfect list is harmless.
+# Edit freely to match the exact universe you want to study.
+NDX100: List[str] = [
+    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "GOOG", "META", "TSLA", "AVGO",
+    "COST", "NFLX", "ASML", "AMD", "PEP", "ADBE", "LIN", "CSCO", "TMUS",
+    "INTU", "QCOM", "TXN", "AMGN", "ISRG", "AMAT", "BKNG", "HON", "VRTX",
+    "ADP", "PANW", "GILD", "MU", "ADI", "REGN", "SBUX", "MDLZ", "LRCX",
+    "KLAC", "SNPS", "CDNS", "PYPL", "MELI", "CRWD", "MAR", "CTAS", "ORLY",
+    "ABNB", "CEG", "WDAY", "NXPI", "PCAR", "ROP", "MRVL", "MNST", "ADSK",
+    "FTNT", "DASH", "TTD", "CPRT", "PAYX", "KDP", "ROST", "ODFL", "FANG",
+    "EA", "VRSK", "XEL", "KHC", "EXC", "GEHC", "CTSH", "FAST", "CCEP",
+    "DDOG", "LULU", "BKR", "CSGP", "IDXX", "TEAM", "ON", "ZS", "DXCM",
+    "CDW", "TTWO", "WBD", "GFS", "MRNA", "MDB", "ARM", "SMCI", "BIIB",
+    "PDD", "INTC", "AEP", "CMCSA",
+]
+
+# Named universes selectable via --universe (or the DEFAULT_UNIVERSE alias
+# kept for backward compatibility with older callers).
+UNIVERSES = {"starter": STARTER_UNIVERSE, "ndx100": NDX100}
+DEFAULT_UNIVERSE = STARTER_UNIVERSE
 
 OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 OUTPUT_COLUMNS = ["Date"] + OHLCV + FEATURE_COLUMNS
@@ -115,7 +138,9 @@ def fetch_universe(tickers: List[str], start: str, end: str) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch daily OHLCV + features from Yahoo Finance.")
     parser.add_argument("--tickers", nargs="+", default=None,
-                        help="Ticker list (default: built-in starter universe).")
+                        help="Explicit ticker list (overrides --universe).")
+    parser.add_argument("--universe", choices=list(UNIVERSES), default="starter",
+                        help="Named universe to fetch (default: starter, 15 tickers).")
     parser.add_argument("--start", type=str, default="2015-01-01")
     parser.add_argument("--end", type=str, default="2025-11-30")
     return parser.parse_args()
@@ -123,5 +148,5 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    universe = args.tickers if args.tickers else DEFAULT_UNIVERSE
+    universe = args.tickers if args.tickers else UNIVERSES[args.universe]
     fetch_universe(universe, args.start, args.end)
