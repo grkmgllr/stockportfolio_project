@@ -54,11 +54,22 @@ def cmd_fetch(args):
     fetch_universe(tickers, start=args.start, end=args.end)
 
 
+def _resolve_tickers(args):
+    """Pick the ticker list: explicit --tickers, else a named --universe,
+    else the single --ticker. Shared by train / test / walkforward."""
+    if getattr(args, "tickers", None):
+        return args.tickers
+    if getattr(args, "universe", None):
+        from scripts.fetch_data import UNIVERSES
+        return UNIVERSES[args.universe]
+    return [args.ticker]
+
+
 def cmd_train(args):
     """Train the primary forecasting model (LightGBM or PyTorch)."""
     from forecasting import lightgbm_runner, pytorch_runner
 
-    tickers = args.tickers if getattr(args, "tickers", None) else [args.ticker]
+    tickers = _resolve_tickers(args)
     ma_targets = args.ma_targets or []
     # Walk-forward folds set these; a normal run leaves them None (ratio split).
     fold_kw = dict(
@@ -112,7 +123,7 @@ def cmd_test(args):
     """Evaluate a trained model on the test split and save .npy predictions."""
     from forecasting import lightgbm_runner, pytorch_runner
 
-    tickers = args.tickers if getattr(args, "tickers", None) else [args.ticker]
+    tickers = _resolve_tickers(args)
     model_name = args.model
     ma_targets = args.ma_targets or []
     is_pooled = len(tickers) > 1
@@ -312,7 +323,7 @@ def cmd_walkforward(args):
     import copy
     import pandas as pd
 
-    tickers = args.tickers if getattr(args, "tickers", None) else [args.ticker]
+    tickers = _resolve_tickers(args)
 
     csv_path = os.path.join(args.data_root, f"{tickers[0]}.csv")
     if not os.path.exists(csv_path):
@@ -434,6 +445,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--ticker", type=str, default="AAPL")
         p.add_argument("--tickers", nargs="+", default=None,
                        help="Multiple tickers for pooled training/eval (e.g. AAPL MSFT GOOGL)")
+        p.add_argument("--universe", choices=["starter", "ndx100"], default=None,
+                       help="Use a named ticker universe instead of --tickers "
+                            "(starter=15, ndx100=~94). --tickers overrides this.")
         p.add_argument("--model", type=str, default="LightGBM",
                        choices=["LightGBM", "TimesNet", "TimeMixer", "StockMixer"])
         p.add_argument("--seq_len", type=int, default=30)
