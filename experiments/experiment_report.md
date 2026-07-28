@@ -205,3 +205,36 @@ target variance is explained, too little to move MAE. The signal is therefore
 (and, for the trading use, cross-sectional IC / Sharpe) is the primary metric and
 MAE alone would understate the differences. Model ordering LightGBM > TimeMixer >
 TimesNet is consistent across IC and the (marginal) MAE.
+
+---
+
+## 10. Stage-2 meta-labeling on the range model (both barriers from the model)
+
+The range predictions now drive the triple barrier directly:
+`upper = Close[t]·(1+upside·σ)`, `lower = Close[t]·(1+downside·σ)`
+(`triple_barrier.apply_triple_barrier` gained an optional `pred_low_col`;
+`src/meta/generate_range.py` builds the pooled meta-dataset, ffill-only,
+Stage-1 date split, causal features + pred_upside/downside/band/skew).
+
+**Trade distribution (78 tickers, 25,272 trades):** 47.9% take-profit / 51.4%
+stop-loss / 0.7% timeout — balanced, non-degenerate.
+
+**Why the old "66% → 90%" precision was misleading — in-sample vs OOS:**
+
+| Universe | eval | thr | precision | lift |
+|:---|:---|:---|---:|---:|
+| 5 mega-caps | in-sample | 0.6 | **0.907** | (= the old headline) |
+| 5 mega-caps | **OOS holdout** | 0.6 | **0.438** | **−0.066** |
+| 78 full | in-sample | 0.6 | 0.861 | — |
+| 78 full | **OOS holdout** | 0.5 | 0.475 | **+0.011** |
+
+**The "66→90" was pure in-sample overfitting.** Trained and evaluated on the
+same rows, the meta-classifier memorises which trades were profitable (5 stocks
+→ 90%). On genuinely unseen future data the filter has **no skill** — negative
+lift on the 5-stock set, negligible (+0.01) on 78. This is consistent with the
+weak Stage-1 signal (IC≈0.12): **meta-labeling cannot manufacture signal that is
+not in the primary model.** Both stages share one ceiling — feature signal.
+
+(Caveat: the OOS holdout has no formal embargo yet; the small boundary overlap
+would only inflate OOS, so the ~0-lift conclusion is conservative. Old
+`meta/generate.py` still has a bfill leak; the new range path does not.)

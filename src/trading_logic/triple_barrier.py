@@ -69,7 +69,8 @@ def get_daily_volatility(close: pd.Series, lookback: int = 20,) -> pd.Series:
 
 
 def apply_triple_barrier(df: pd.DataFrame, pred_high_col: str = "pred_high", close_col: str = "Close", high_col: str = "High", low_col: str = "Low",
-    vol_lookback: int = 20, sl_multiplier: float = 2.0, vertical_barrier_periods: int = 5, min_sl_pct: float = 0.005,) -> pd.DataFrame:
+    vol_lookback: int = 20, sl_multiplier: float = 2.0, vertical_barrier_periods: int = 5, min_sl_pct: float = 0.005,
+    pred_low_col: str | None = None,) -> pd.DataFrame:
     """
     Apply the Triple Barrier Method with a dynamic volatility-based stop-loss.
 
@@ -168,8 +169,13 @@ def apply_triple_barrier(df: pd.DataFrame, pred_high_col: str = "pred_high", clo
 
     out["upper_barrier"] = pred_high.clip(lower=entry * 1.0001)
 
-    sl_pct = (out["daily_vol"] * sl_multiplier).clip(lower=min_sl_pct)
-    out["lower_barrier"] = entry * (1.0 - sl_pct)
+    if pred_low_col is not None:
+        # Model-predicted stop-loss (range mode): both barriers come from the
+        # primary model. Clip just below entry to avoid a degenerate SL == entry.
+        out["lower_barrier"] = out[pred_low_col].clip(upper=entry * 0.9999)
+    else:
+        sl_pct = (out["daily_vol"] * sl_multiplier).clip(lower=min_sl_pct)
+        out["lower_barrier"] = entry * (1.0 - sl_pct)
 
     # --- initialise output columns ---
     n = len(out)
