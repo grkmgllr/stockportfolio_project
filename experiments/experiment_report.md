@@ -180,3 +180,28 @@ test n = 26,832. IC_no = non-overlap (stride = pred_len) sanity check.
   overfit); a final walk-forward + light tuning is a pre-paper step, but the
   ordering is decisive.
 - StockMixer (cross-stock) is not yet ported to range mode — separate data path.
+
+### 9.1 Full metrics (all channels, from saved checkpoints)
+
+Vol-normalised units. `baseMAE` = predict-the-mean baseline. test n = 26,832.
+
+| Model | Channel | IC | IC_no | MAE | RMSE | baseMAE | DA% | up% |
+|:---|:---|---:|---:|---:|---:|---:|---:|---:|
+| LightGBM | upside | **0.124** | 0.102 | 1.151 | 1.689 | 1.163 | 71.6 | 71.6 |
+| | downside | **0.107** | 0.120 | 1.174 | 1.719 | 1.188 | 67.2 | 32.8 |
+| | net | 0.039 | 0.024 | 2.297 | 3.373 | 2.298 | 52.5 | 52.6 |
+| TimeMixer | upside | 0.099 | 0.097 | 1.163 | 1.696 | 1.163 | 71.6 | 71.6 |
+| | downside | 0.050 | 0.060 | 1.180 | 1.726 | 1.188 | 67.2 | 32.8 |
+| | net | 0.026 | 0.032 | 2.303 | 3.377 | 2.298 | 52.5 | 52.6 |
+| TimesNet | upside | 0.083 | 0.075 | 1.162 | 1.697 | 1.163 | 71.6 | 71.6 |
+| | downside | 0.045 | 0.052 | 1.183 | 1.727 | 1.188 | 67.2 | 32.8 |
+| | net | 0.022 | 0.020 | 2.305 | 3.378 | 2.298 | 51.3 | 52.6 |
+
+**MAE is not a discriminating metric here.** Every model's MAE/RMSE sits at the
+predict-the-mean baseline (LightGBM upside 1.151 vs baseMAE 1.163 — a ~1%
+reduction; TimeMixer/TimesNet ≈ 1.163 = baseline). With IC ≈ 0.12 only ~1.5% of
+target variance is explained, too little to move MAE. The signal is therefore
+**real but small, visible in IC (ranking) not in MAE** — which is exactly why IC
+(and, for the trading use, cross-sectional IC / Sharpe) is the primary metric and
+MAE alone would understate the differences. Model ordering LightGBM > TimeMixer >
+TimesNet is consistent across IC and the (marginal) MAE.
