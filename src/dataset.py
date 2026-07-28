@@ -65,6 +65,8 @@ class StockDataset(Dataset):
         end_date: Optional[str] = None,
         train_end_date: Optional[str] = None,
         val_end_date: Optional[str] = None,
+        target_mode: str = "price",
+        range_horizon: Optional[int] = None,
     ):
         """
         Args:
@@ -99,6 +101,10 @@ class StockDataset(Dataset):
         self.flag = flag
         self.seq_len = seq_len
         self.pred_len = pred_len
+        # Range mode: predict the vol-normalised forward-averaged upside/downside
+        # band ([up, dn]) off the Close[t] anchor, over `range_horizon` days.
+        self.target_mode = target_mode
+        self.range_horizon = range_horizon or pred_len
         self.scale = scale
         self.return_targets = return_targets
         self.start_date = start_date
@@ -266,6 +272,15 @@ class StockDataset(Dataset):
         close_col_idx = self.input_features.index('Close')
         self.raw_close = df_input.iloc[border1:border2, close_col_idx].values.astype(np.float64)
 
+        # Range mode needs raw High/Low (for the forward-avg band) and sigma
+        # (volatility_20) for vol-normalisation, sliced to the same split.
+        if self.target_mode == "range":
+            self.raw_high = df_raw['High'].values[border1:border2].astype(np.float64)
+            self.raw_low = df_raw['Low'].values[border1:border2].astype(np.float64)
+            self.raw_sigma = df_raw['volatility_20'].values[border1:border2].astype(np.float64)
+            # Two output channels: upside, downside (single forward step).
+            self.target_features = ['upside', 'downside']
+
         if self.scale:
             # Fit on the train split only (no future leakage), then transform
             # every row with those train statistics; the split slice happens
@@ -306,10 +321,21 @@ class StockDataset(Dataset):
         """
         s_begin = index
         s_end = s_begin + self.seq_len       # input window end
+        seq_x = self.data_x[s_begin:s_end]
+
+        if self.target_mode == "range":
+            # Forward-averaged upside/downside band, vol-normalised, off Close[t].
+            H = self.range_horizon
+            anchor = self.raw_close[s_end - 1]
+            sigma = self.raw_sigma[s_end - 1]
+            up = (self.raw_high[s_end:s_end + H].mean() - anchor) / anchor / sigma
+            dn = (self.raw_low[s_end:s_end + H].mean() - anchor) / anchor / sigma
+            seq_y = np.array([[up, dn]], dtype=np.float64)   # [1, 2]
+            return (torch.tensor(seq_x, dtype=torch.float32),
+                    torch.tensor(seq_y, dtype=torch.float32))
+
         r_begin = s_end                      # target window start (no overlap)
         r_end = r_begin + self.pred_len
-
-        seq_x = self.data_x[s_begin:s_end]
         seq_y = self.data_y[r_begin:r_end]
 
         if self.return_targets:
@@ -321,9 +347,10 @@ class StockDataset(Dataset):
             torch.tensor(seq_x, dtype=torch.float32),
             torch.tensor(seq_y, dtype=torch.float32),
         )
-    
+
     def __len__(self):
-        return len(self.data_x) - self.seq_len - self.pred_len + 1
+        horizon = self.range_horizon if self.target_mode == "range" else self.pred_len
+        return len(self.data_x) - self.seq_len - horizon + 1
     
     def get_anchors(self) -> np.ndarray:
         """Return anchor Close prices for all samples (one per sample)."""

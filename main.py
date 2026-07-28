@@ -320,25 +320,43 @@ def cmd_range(args):
       downside = (mean(Low [t+1..t+H]) - Close[t]) / Close[t] / sigma[t]
     Feeds the Stage-2 triple barrier (upper=upside, lower=downside).
     """
-    from forecasting import lightgbm_runner as R
-
-    if args.model != "LightGBM":
-        raise SystemExit("`range` is implemented for --model LightGBM only.")
     tickers = _resolve_tickers(args)
     print(f"\n{'#' * 64}")
-    print(f"  RANGE FORECAST — {len(tickers)} ticker(s) | "
+    print(f"  RANGE FORECAST — {args.model} | {len(tickers)} ticker(s) | "
           f"train<={args.train_end_date} val<={args.val_end_date}")
     print(f"{'#' * 64}")
 
-    fc = R.train_pooled_range(
-        tickers, args.data_root, args.seq_len, args.pred_len,
-        start_date=args.start_date, train_end_date=args.train_end_date,
-        val_end_date=args.val_end_date,
-    )
-    preds, trues = R.evaluate_range_pooled(
-        tickers, args.data_root, fc, start_date=args.start_date,
-        train_end_date=args.train_end_date, val_end_date=args.val_end_date,
-    )
+    if args.model == "LightGBM":
+        from forecasting import lightgbm_runner as R
+        fc = R.train_pooled_range(
+            tickers, args.data_root, args.seq_len, args.pred_len,
+            start_date=args.start_date, train_end_date=args.train_end_date,
+            val_end_date=args.val_end_date,
+        )
+        preds, trues = R.evaluate_range_pooled(
+            tickers, args.data_root, fc, start_date=args.start_date,
+            train_end_date=args.train_end_date, val_end_date=args.val_end_date,
+        )
+    else:
+        # Neural (TimeMixer / TimesNet): same range target, fair comparison.
+        from forecasting import pytorch_runner as P
+        P.train(
+            tickers, args.model, [], seq_len=args.seq_len, pred_len=args.pred_len,
+            epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
+            patience=args.patience, data_root=args.data_root,
+            start_date=args.start_date, train_end_date=args.train_end_date,
+            val_end_date=args.val_end_date, target_mode="range",
+        )
+        parts_p, parts_t = [], []
+        for t in tickers:
+            p, tr = P.evaluate_range(
+                t, args.model, seq_len=args.seq_len, pred_len=args.pred_len,
+                batch_size=args.batch_size, data_root=args.data_root,
+                start_date=args.start_date, train_end_date=args.train_end_date,
+                val_end_date=args.val_end_date,
+            )
+            parts_p.append(p); parts_t.append(tr)
+        preds, trues = np.concatenate(parts_p), np.concatenate(parts_t)
 
     def _ic(a, b):
         a, b = a.ravel(), b.ravel()
@@ -558,6 +576,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(p_range)
     p_range.add_argument("--train_end_date", type=str, default="2023-11-24")
     p_range.add_argument("--val_end_date", type=str, default="2024-05-28")
+    # Neural-only (ignored by LightGBM): TimeMixer / TimesNet training.
+    p_range.add_argument("--epochs", type=int, default=60)
+    p_range.add_argument("--batch_size", type=int, default=256)
+    p_range.add_argument("--lr", type=float, default=2e-4)
+    p_range.add_argument("--patience", type=int, default=15)
 
     # --- meta-label ---
     p_meta = subparsers.add_parser("meta-label", help="Generate triple-barrier meta-labels")

@@ -29,12 +29,21 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
           train_end_date: str | None = None,
           val_end_date: str | None = None,
           device: str | None = None,
+          target_mode: str = "price",
           checkpoint_dir: str = CHECKPOINTS_ROOT) -> str:
     """Train a PyTorch forecaster (optionally on pooled tickers).
+
+    ``target_mode='range'`` trains on the vol-normalised upside/downside band
+    ([up, dn], one forward step) instead of the per-step price returns.
 
     Returns the checkpoint path so callers can load it back.
     """
     label = "pooled" if len(tickers) > 1 else tickers[0]
+    is_range = target_mode == "range"
+    if is_range:
+        label = f"{label}_range"
+    # Model output horizon: range predicts a single 2-channel step.
+    model_pred_len = 1 if is_range else pred_len
 
     train_cfg = TrainingConfig(
         model_name=model_name,
@@ -59,6 +68,7 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
         split_kw = dict(
             start_date=start_date, end_date=end_date,
             train_end_date=train_end_date, val_end_date=val_end_date,
+            target_mode=target_mode, range_horizon=pred_len,
         )
         train_datasets.append(StockDataset(
             ticker=t, root_path=train_cfg.data_root, flag="train",
@@ -82,7 +92,7 @@ def train(tickers: List[str], model_name: str, ma_targets: List[str],
     ref_dataset = train_datasets[0]
 
     model_cfg = get_model_config(
-        train_cfg.model_name, train_cfg.seq_len, train_cfg.pred_len,
+        train_cfg.model_name, train_cfg.seq_len, model_pred_len,
         enc_in=ref_dataset.enc_in,
         c_out=ref_dataset.c_out,
         denorm_indices=ref_dataset.denorm_indices,
@@ -200,3 +210,45 @@ def evaluate(ticker: str, model_name: str, ma_targets: List[str],
         model, test_loader, criterion, device, test_dataset,
     )
     return preds, trues, test_dataset.target_features, eval_results
+
+
+def evaluate_range(ticker: str, model_name: str, *,
+                   seq_len: int, pred_len: int, batch_size: int, data_root: str,
+                   checkpoint_override: str | None = None,
+                   start_date: str | None = None, end_date: str | None = None,
+                   train_end_date: str | None = None, val_end_date: str | None = None,
+                   device: str | None = None,
+                   checkpoint_dir: str = CHECKPOINTS_ROOT):
+    """Evaluate a range-mode neural model on one ticker's test split.
+
+    Returns (preds[N, 2], trues[N, 2]) with channels [upside, downside]
+    (vol-normalised), aligned the same way as the LightGBM range path.
+    """
+    ds = StockDataset(
+        ticker=ticker, root_path=data_root, flag="test",
+        seq_len=seq_len, pred_len=pred_len, ma_targets=[], return_targets=True,
+        start_date=start_date, end_date=end_date,
+        train_end_date=train_end_date, val_end_date=val_end_date,
+        target_mode="range", range_horizon=pred_len,
+    )
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, drop_last=False)
+    model_cfg = get_model_config(
+        model_name, seq_len, 1,          # single 2-channel forward step
+        enc_in=ds.enc_in, c_out=ds.c_out,
+        denorm_indices=ds.denorm_indices, return_targets=True,
+    )
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = get_model(model_name, model_cfg).to(device)
+    ckpt = checkpoint_override or os.path.join(
+        checkpoint_dir, f"pooled_range_{model_name}_best.pt")
+    load_checkpoint(model, ckpt, device)
+    model.eval()
+
+    P, T = [], []
+    with torch.no_grad():
+        for x, y in loader:
+            out = model(x.to(device))
+            P.append(out.cpu().numpy().reshape(x.shape[0], -1))
+            T.append(y.numpy().reshape(y.shape[0], -1))
+    return np.concatenate(P), np.concatenate(T)
