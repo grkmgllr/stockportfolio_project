@@ -189,8 +189,10 @@ class StockDataset(Dataset):
         if self.end_date and 'Date' in df_raw.columns:
             df_raw = df_raw[df_raw['Date'] <= self.end_date].reset_index(drop=True)
 
-        # Handle missing values with forward fill then backward fill
-        df_raw = df_raw.ffill().bfill()
+        # ffill only — bfill would pull FUTURE values backward (look-ahead leak).
+        df_raw = df_raw.ffill().dropna(
+            subset=['Open', 'High', 'Low', 'Close', 'Volume']
+        ).reset_index(drop=True)
         
         # Compute moving-average target columns from Close before any
         # splitting so the rolling windows see the full history.

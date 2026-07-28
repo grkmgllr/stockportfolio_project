@@ -144,3 +144,57 @@ def evaluate(ticker: str, data_root: str, ma_targets: List[str],
         )
 
     return preds, trues, target_features, eval_results
+
+
+# ======================================================================
+# RANGE mode (upside/downside band, vol-normalised) — Stage-1 redesign.
+# Self-contained train + pooled evaluation, parallel to the price path.
+# ======================================================================
+
+def train_pooled_range(tickers: List[str], data_root: str,
+                       seq_len: int, pred_len: int,
+                       start_date: str | None = None,
+                       train_end_date: str | None = None,
+                       val_end_date: str | None = None) -> LightGBMForecaster:
+    """Train pooled upside/downside regressors (vol-normalised range target)."""
+    train_dfs, val_dfs = [], []
+    for t in tickers:
+        df, train_end, val_end, _ = load_raw_df(
+            t, data_root, ma_targets=[], start_date=start_date,
+            train_end_date=train_end_date, val_end_date=val_end_date,
+        )
+        train_dfs.append(df.iloc[:train_end].copy())
+        val_dfs.append(df.iloc[train_end:val_end].copy())
+
+    fc = LightGBMForecaster(seq_len=seq_len, pred_len=pred_len, target_mode="range")
+    fc.fit_pooled_range(train_dfs, val_dfs, early_stopping_rounds=200,
+                        ticker_labels=tickers)
+    os.makedirs(CHECKPOINTS_ROOT, exist_ok=True)
+    ckpt = os.path.join(CHECKPOINTS_ROOT, "pooled_LightGBM_range_best.joblib")
+    fc.save(ckpt)
+    print(f"\nCheckpoint: {ckpt}")
+    return fc
+
+
+def evaluate_range_pooled(tickers: List[str], data_root: str, fc: LightGBMForecaster,
+                          start_date: str | None = None,
+                          train_end_date: str | None = None,
+                          val_end_date: str | None = None
+                          ) -> Tuple[np.ndarray, np.ndarray]:
+    """Predict the test window for every ticker; return pooled (preds, trues)
+    arrays of shape [N, 2] with channels [upside, downside] (vol-normalised)."""
+    P, T = [], []
+    for t in tickers:
+        df, _train_end, val_end, _ = load_raw_df(
+            t, data_root, ma_targets=[], start_date=start_date,
+            train_end_date=train_end_date, val_end_date=val_end_date,
+        )
+        preds, _anchor, _sigma = fc.predict_range(df)
+        trues = fc.range_ground_truth(df)
+        n_test = (len(df) - val_end) - fc.seq_len - fc.pred_len + 1
+        if n_test <= 0:
+            continue
+        s = val_end - 1
+        P.append(preds[s:s + n_test])
+        T.append(trues[s:s + n_test])
+    return np.concatenate(P), np.concatenate(T)

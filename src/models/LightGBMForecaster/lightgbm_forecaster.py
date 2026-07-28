@@ -91,9 +91,21 @@ class LightGBMForecaster:
         seq_len: int = 30,
         pred_len: int = 5,
         lgb_params: Optional[Dict[str, Any]] = None,
+        target_mode: str = "price",
     ):
+        """
+        target_mode:
+          "price" — legacy: predict next-``pred_len`` High & Close prices as
+                    per-step returns off the Close[t] anchor (feeds Stage-2 as-is).
+          "range" — predict the forward-averaged upside/downside band, vol-
+                    normalised, off the Close[t] anchor:
+                      up = (mean(High[t+1..t+H]) - Close[t]) / Close[t] / sigma[t]
+                      dn = (mean(Low [t+1..t+H]) - Close[t]) / Close[t] / sigma[t]
+                    sigma = volatility_20. One model per channel (upside/downside).
+        """
         self.seq_len = seq_len
         self.pred_len = pred_len
+        self.target_mode = target_mode
 
         self._params = self.DEFAULT_PARAMS.copy()
         if lgb_params is not None:
@@ -323,6 +335,100 @@ class LightGBMForecaster:
             "feature_names": feature_names,
         }
 
+    # ------------------------------------------------------------------
+    # Range mode (upside/downside band, vol-normalised) — self-contained
+    # path so the legacy "price" mode is untouched.
+    # ------------------------------------------------------------------
+
+    def _build_range_arrays(self, df_train: pd.DataFrame, df_val: pd.DataFrame) -> Dict[str, Any]:
+        """Per-ticker (X, upside, downside) arrays for train and val splits."""
+        df = pd.concat([df_train, df_val], ignore_index=True)
+        feat = self.engineer_features(df)
+        X = np.nan_to_num(feat.values.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+        c = df["Close"].values.astype(np.float64)
+        h = df["High"].values.astype(np.float64)
+        lo = df["Low"].values.astype(np.float64)
+        sig = df["volatility_20"].values.astype(np.float64)
+        H = self.pred_len
+
+        n_train, n_val = len(df_train), len(df_val)
+        blocks = {
+            "train": range(self.seq_len, n_train - H),
+            "val":   range(max(n_train, self.seq_len), n_train + n_val - H),
+        }
+        out = {"feature_names": list(feat.columns)}
+        for name, rng in blocks.items():
+            Xs, ups, dns = [], [], []
+            for i in rng:
+                s = sig[i]
+                if not np.isfinite(s) or s <= 0 or i + H >= len(df):
+                    continue
+                up = (h[i+1:i+1+H].mean() - c[i]) / c[i] / s
+                dn = (lo[i+1:i+1+H].mean() - c[i]) / c[i] / s
+                Xs.append(X[i]); ups.append(up); dns.append(dn)
+            out[f"X_{name}"] = np.array(Xs) if Xs else None
+            out[f"up_{name}"] = np.array(ups)
+            out[f"dn_{name}"] = np.array(dns)
+        return out
+
+    def fit_pooled_range(self, train_dfs, val_dfs, early_stopping_rounds=200,
+                         ticker_labels=None):
+        """Train upside & downside regressors pooled over many tickers."""
+        assert len(train_dfs) == len(val_dfs)
+        self.target_features = ["upside", "downside"]
+        per = [self._build_range_arrays(dt, dv) for dt, dv in zip(train_dfs, val_dfs)]
+        self.feature_names = per[0]["feature_names"]
+
+        def cat(key):
+            parts = [p[key] for p in per if p[key] is not None and len(p[key])]
+            return np.concatenate(parts) if parts else None
+        Xtr, Xva = cat("X_train"), cat("X_val")
+        ytr = {"upside": cat("up_train"), "downside": cat("dn_train")}
+        yva = {"upside": cat("up_val"),   "downside": cat("dn_val")}
+
+        print(f"\n{'='*60}\nLightGBM RANGE mode | features={len(self.feature_names)} "
+              f"| train={len(Xtr)} val={0 if Xva is None else len(Xva)}\n{'='*60}")
+        self.models = {}
+        Xtr_df = pd.DataFrame(Xtr, columns=self.feature_names)
+        Xva_df = pd.DataFrame(Xva, columns=self.feature_names) if Xva is not None else None
+        for ch in self.target_features:
+            m = lgb.LGBMRegressor(**self._params)
+            kw = {}
+            if Xva_df is not None:
+                kw = dict(eval_set=[(Xva_df, yva[ch])],
+                          callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False),
+                                     lgb.log_evaluation(0)])
+            m.fit(Xtr_df, ytr[ch], **kw)
+            self.models[("range", ch)] = m
+            print(f"  {ch:9s} best_iter={getattr(m,'best_iteration_',m.n_estimators)}")
+        return self
+
+    def predict_range(self, df: pd.DataFrame):
+        """Return (preds[N,2], anchor[N], sigma[N]); channels = [upside, downside]."""
+        feat = self.engineer_features(df)
+        X = np.nan_to_num(feat.values.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+        start, end = self.seq_len, len(df) - self.pred_len
+        Xp = pd.DataFrame(X[start:end], columns=self.feature_names)
+        anchor = df["Close"].values[start:end].astype(np.float64)
+        sigma = df["volatility_20"].values[start:end].astype(np.float64)
+        preds = np.column_stack([
+            self.models[("range", "upside")].predict(Xp),
+            self.models[("range", "downside")].predict(Xp),
+        ])
+        return preds, anchor, sigma
+
+    def range_ground_truth(self, df: pd.DataFrame) -> np.ndarray:
+        """True vol-normalised [upside, downside] aligned to predict_range."""
+        c = df["Close"].values.astype(np.float64)
+        h = df["High"].values.astype(np.float64)
+        lo = df["Low"].values.astype(np.float64)
+        sig = df["volatility_20"].values.astype(np.float64)
+        H = self.pred_len
+        start, end = self.seq_len, len(df) - self.pred_len
+        up = np.array([(h[i+1:i+1+H].mean() - c[i]) / c[i] / sig[i] for i in range(start, end)])
+        dn = np.array([(lo[i+1:i+1+H].mean() - c[i]) / c[i] / sig[i] for i in range(start, end)])
+        return np.column_stack([up, dn])
+
     def _pool_arrays(self, per_ticker: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Concatenate the per-ticker (X, y) arrays for a joint fit."""
         feature_names = per_ticker[0]["feature_names"]
@@ -540,6 +646,7 @@ class LightGBMForecaster:
         payload = {
             "seq_len": self.seq_len,
             "pred_len": self.pred_len,
+            "target_mode": self.target_mode,
             "target_features": self.target_features,
             "feature_names": self.feature_names,
             "params": self._params,
@@ -556,6 +663,7 @@ class LightGBMForecaster:
             seq_len=payload["seq_len"],
             pred_len=payload["pred_len"],
             lgb_params=payload["params"],
+            target_mode=payload.get("target_mode", "price"),
         )
         instance.target_features = payload["target_features"]
         instance.feature_names = payload["feature_names"]
