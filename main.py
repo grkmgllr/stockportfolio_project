@@ -312,6 +312,52 @@ def _build_folds(dates, n_folds: int, test_size: int):
     return folds
 
 
+def cmd_range(args):
+    """Stage-1 redesign: train + evaluate the vol-normalised upside/downside band.
+
+    target per day t (forward-averaged, Close[t] anchor, sigma=volatility_20):
+      upside   = (mean(High[t+1..t+H]) - Close[t]) / Close[t] / sigma[t]
+      downside = (mean(Low [t+1..t+H]) - Close[t]) / Close[t] / sigma[t]
+    Feeds the Stage-2 triple barrier (upper=upside, lower=downside).
+    """
+    from forecasting import lightgbm_runner as R
+
+    if args.model != "LightGBM":
+        raise SystemExit("`range` is implemented for --model LightGBM only.")
+    tickers = _resolve_tickers(args)
+    print(f"\n{'#' * 64}")
+    print(f"  RANGE FORECAST — {len(tickers)} ticker(s) | "
+          f"train<={args.train_end_date} val<={args.val_end_date}")
+    print(f"{'#' * 64}")
+
+    fc = R.train_pooled_range(
+        tickers, args.data_root, args.seq_len, args.pred_len,
+        start_date=args.start_date, train_end_date=args.train_end_date,
+        val_end_date=args.val_end_date,
+    )
+    preds, trues = R.evaluate_range_pooled(
+        tickers, args.data_root, fc, start_date=args.start_date,
+        train_end_date=args.train_end_date, val_end_date=args.val_end_date,
+    )
+
+    def _ic(a, b):
+        a, b = a.ravel(), b.ravel()
+        m = np.isfinite(a) & np.isfinite(b)
+        return float(np.corrcoef(a[m], b[m])[0, 1]) if m.sum() > 3 else float("nan")
+
+    idx = np.arange(0, len(preds), args.pred_len)   # non-overlap sanity
+    print(f"\n  {'channel':<12}{'IC':>8}{'IC_no':>8}{'DA%':>7}{'up%':>7}  (test n={len(preds)})")
+    for i, nm in enumerate(["upside", "downside"]):
+        p, t = preds[:, i], trues[:, i]
+        da = 100 * np.mean(np.sign(p) == np.sign(t)); up = 100 * np.mean(t > 0)
+        print(f"  {nm:<12}{_ic(p, t):>8.3f}{_ic(p[idx], t[idx]):>8.3f}{da:>7.1f}{up:>7.1f}")
+    np_, nt = preds[:, 0] + preds[:, 1], trues[:, 0] + trues[:, 1]
+    da = 100 * np.mean(np.sign(np_) == np.sign(nt)); up = 100 * np.mean(nt > 0)
+    print(f"  {'net(up+dn)':<12}{_ic(np_, nt):>8.3f}{_ic(np_[idx], nt[idx]):>8.3f}{da:>7.1f}{up:>7.1f}")
+    print(f"\n  upside IC = vol-adjusted 'more-than-expected upside' skill.")
+    return preds, trues
+
+
 def cmd_walkforward(args):
     """Re-run train+test over several sequential folds and report mean ± std.
 
@@ -503,6 +549,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_wf.add_argument("--market_dim", type=int, default=2)
     p_wf.add_argument("--seed", type=int, default=42)
 
+    # --- range (Stage-1 redesign: vol-normalised upside/downside band) ---
+    p_range = subparsers.add_parser(
+        "range",
+        help="LightGBM upside/downside band forecast (forward-avg High/Low, "
+             "Close anchor, vol-normalised) — single train/val/test split",
+    )
+    add_common_args(p_range)
+    p_range.add_argument("--train_end_date", type=str, default="2023-11-24")
+    p_range.add_argument("--val_end_date", type=str, default="2024-05-28")
+
     # --- meta-label ---
     p_meta = subparsers.add_parser("meta-label", help="Generate triple-barrier meta-labels")
     p_meta.add_argument("--ticker", type=str, default="AAPL")
@@ -564,6 +620,7 @@ def main():
     commands = {
         "fetch": cmd_fetch,
         "train": cmd_train,
+        "range": cmd_range,
         "walkforward": cmd_walkforward,
         "test": cmd_test,
         "meta-label": cmd_meta_label,

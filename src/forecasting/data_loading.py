@@ -40,7 +40,9 @@ def load_raw_df(ticker: str, data_root: str, ma_targets: List[str],
         df = df[df["Date"] >= start_date].reset_index(drop=True)
     if end_date and "Date" in df.columns:
         df = df[df["Date"] <= end_date].reset_index(drop=True)
-    df = df.ffill().bfill()
+    # ffill only — bfill would back-fill from FUTURE rows (look-ahead leak).
+    # CSVs are pre-cleaned so any remaining NaN is a leading gap; drop it.
+    df = df.ffill().dropna(subset=["Open", "High", "Low", "Close", "Volume"]).reset_index(drop=True)
 
     for ma_name in ma_targets:
         cfg = StockDataset.MA_CONFIGS[ma_name]
