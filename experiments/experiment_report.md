@@ -152,3 +152,31 @@ Stage-2 usage where barriers are set in units of σ.
 - Diagnostics: `experiments/diag.py` (SMA-anchor IC decomposition),
   `experiments/run_v2.py` (anchor/target variants).
 - Slurm: `experiments/*.sbatch` (partition `cuda`, LightGBM ≈ 70 s per run).
+
+---
+
+## 9. Fair model comparison on the range target (all models, one pipeline)
+
+The range target (§4) is now integrated into the actual pipeline, not just the
+harness:
+- `LightGBMForecaster(target_mode="range")` + `main.py range --model LightGBM`
+- `StockDataset(target_mode="range")` + `pytorch_runner` range path +
+  `main.py range --model TimeMixer|TimesNet` (model-agnostic; same code path)
+
+All three pooled forecasters trained + evaluated on the **identical** single
+split (train ≤ 2023-11-24, val ≤ 2024-05-28, test after), 78 tickers,
+test n = 26,832. IC_no = non-overlap (stride = pred_len) sanity check.
+
+| Model | upside IC | upside IC_no | downside IC | net IC | train time |
+|:---|---:|---:|---:|---:|---:|
+| LightGBM  | **0.124** | 0.102 | **0.107** | **0.039** | ~1 min |
+| TimeMixer | 0.099 | 0.097 | 0.050 | 0.026 | ~10 min |
+| TimesNet  | 0.083 | 0.075 | 0.045 | 0.022 | ~12 min |
+
+- LightGBM leads on every channel and metric; ordering **LightGBM > TimeMixer >
+  TimesNet** matches the price-target result — the neural architectures do not
+  beat gradient boosting here, now measured fairly on the corrected target.
+- All honest (IC_no ≈ IC). Neural runs used 40 epochs, untuned (TimesNet mildly
+  overfit); a final walk-forward + light tuning is a pre-paper step, but the
+  ordering is decisive.
+- StockMixer (cross-stock) is not yet ported to range mode — separate data path.
