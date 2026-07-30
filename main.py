@@ -1,24 +1,22 @@
 """
 Unified entry point for the stock forecasting pipeline.
 
-This module is a thin CLI dispatcher — every command's real work lives
-under ``src/forecasting/``, ``src/meta/``, or ``src/reporting.py``.
+Thin CLI dispatcher — the real work lives under ``src/forecasting/``.
 
 Usage:
-    python main.py fetch --ticker AAPL
-    python main.py fetch --all
-    python main.py train --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META
-    python main.py test  --model TimeMixer --ticker  AAPL
-    python main.py meta-label --ticker AAPL --model TimeMixer
-    python main.py train-meta --ticker AAPL --model TimeMixer
-    python main.py evaluate   --ticker AAPL --model TimeMixer
-    python main.py run-all    --ticker AAPL --model LightGBM
+    python main.py fetch --tickers AAPL MSFT GOOGL --start 2015-01-01
+    # Vol-normalised upside/downside band forecast (the Stage-1 target):
+    python main.py range --model LightGBM  --tickers AAPL MSFT ... --start_date 2015-01-01
+    python main.py range --model TimeMixer --tickers AAPL MSFT ... --epochs 40
+    python main.py range --model LightGBM  --tickers AAPL MSFT ... --folds 4   # walk-forward
+    # StockMixer (cross-stock return-ranking model, its own path):
+    python main.py train --model StockMixer --tickers AAPL MSFT GOOGL
+    python main.py test  --model StockMixer --tickers AAPL MSFT GOOGL
 """
 
 import argparse
 import os
 import sys
-import time
 
 # src/ on sys.path so bare `from dataset import ...` etc. still work
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
@@ -28,7 +26,6 @@ import numpy as np
 from paths import (
     CHECKPOINTS_ROOT,
     DATA_ROOT,
-    meta_predictions_path,
     results_dir,
 )
 from reporting import print_test_results, save_run_metrics
@@ -216,79 +213,6 @@ def cmd_test(args):
     return all_results
 
 
-def cmd_meta_label(args):
-    """Generate triple-barrier meta-labels from primary model predictions."""
-    sys.argv = [
-        "generate.py",
-        "--ticker", args.ticker,
-        "--model", args.model,
-        "--seq_len", str(args.seq_len),
-        "--pred_len", str(args.pred_len),
-        "--data_root", args.data_root,
-    ]
-    if args.ma_targets:
-        sys.argv += ["--target_names"] + ["High", "Close"] + args.ma_targets
-
-    from meta.generate import main as gen_main
-    gen_main()
-
-
-def cmd_train_meta(args):
-    """Train the LightGBM meta-classifier with Purged K-Fold CV."""
-    sys.argv = [
-        "train.py",
-        "--ticker", args.ticker,
-        "--model", args.model,
-        "--threshold", str(args.threshold),
-    ]
-    from meta.train import main as tm_main
-    tm_main()
-
-
-def cmd_evaluate(args):
-    """Report precision/recall/F1/PSR before vs after meta-filtering."""
-    import pandas as pd
-    from trading_logic.evaluation import full_evaluation, print_evaluation_report
-
-    path = meta_predictions_path(args.ticker, args.model)
-    if not os.path.exists(path):
-        print(f"No meta predictions found at {path}")
-        print(f"Run: python main.py train-meta --ticker {args.ticker} "
-              f"--model {args.model} first.")
-        return
-
-    df = pd.read_csv(path)
-    results = full_evaluation(df, threshold=args.threshold)
-    print_evaluation_report(results, threshold=args.threshold)
-
-
-def cmd_run_all(args):
-    """Run the complete pipeline: train → test → meta-label → train-meta."""
-    ticker = args.ticker
-    model = args.model
-
-    print(f"\n{'#' * 60}")
-    print(f"  FULL PIPELINE: {ticker} / {model}")
-    print(f"{'#' * 60}")
-
-    t0 = time.time()
-    print(f"\n[1/4] Training {model}...")
-    cmd_train(args)
-
-    print(f"\n[2/4] Testing {model}...")
-    cmd_test(args)
-
-    print(f"\n[3/4] Generating meta-labels...")
-    cmd_meta_label(args)
-
-    print(f"\n[4/4] Training meta-classifier...")
-    cmd_train_meta(args)
-
-    print(f"\n{'#' * 60}")
-    print(f"  PIPELINE COMPLETE ({time.time() - t0:.1f}s)")
-    print(f"{'#' * 60}")
-
-
 def _build_folds(dates, n_folds: int, test_size: int):
     """Cut the tail of the calendar into consecutive, non-overlapping folds.
 
@@ -321,6 +245,9 @@ def cmd_range(args):
     Feeds the Stage-2 triple barrier (upper=upside, lower=downside).
     """
     tickers = _resolve_tickers(args)
+    if getattr(args, "folds", 1) > 1:
+        return _cmd_range_walkforward(args, tickers)
+
     print(f"\n{'#' * 64}")
     print(f"  RANGE FORECAST — {args.model} | {len(tickers)} ticker(s) | "
           f"train<={args.train_end_date} val<={args.val_end_date}")
@@ -333,7 +260,7 @@ def cmd_range(args):
             start_date=args.start_date, train_end_date=args.train_end_date,
             val_end_date=args.val_end_date,
         )
-        preds, trues = R.evaluate_range_pooled(
+        preds, trues, dates = R.evaluate_range_pooled(
             tickers, args.data_root, fc, start_date=args.start_date,
             train_end_date=args.train_end_date, val_end_date=args.val_end_date,
         )
@@ -357,6 +284,7 @@ def cmd_range(args):
             )
             parts_p.append(p); parts_t.append(tr)
         preds, trues = np.concatenate(parts_p), np.concatenate(parts_t)
+        dates = None   # neural eval path does not yet track per-row dates
 
     def _ic(a, b):
         a, b = a.ravel(), b.ravel()
@@ -373,7 +301,128 @@ def cmd_range(args):
     da = 100 * np.mean(np.sign(np_) == np.sign(nt)); up = 100 * np.mean(nt > 0)
     print(f"  {'net(up+dn)':<12}{_ic(np_, nt):>8.3f}{_ic(np_[idx], nt[idx]):>8.3f}{da:>7.1f}{up:>7.1f}")
     print(f"\n  upside IC = vol-adjusted 'more-than-expected upside' skill.")
+
+    # Cross-sectional IC: rank stocks against each other each day, then average
+    # the daily rank correlations. This is the metric that reflects "pick the
+    # right stock today" skill (and where cross-sectional features should show).
+    if dates is not None:
+        _cross_sectional_ic(preds, trues, dates)
+
     return preds, trues
+
+
+def _cross_sectional_ic(preds, trues, dates, min_names=10):
+    """Print per-day cross-sectional IC (Spearman rank IC) + ICIR for each
+    channel. IC_t = corr across stocks on day t; reported as mean ± std over
+    days, with ICIR = mean/std (annualised-style information ratio)."""
+    import pandas as pd
+
+    def _spearman(a, b):
+        ra = pd.Series(a).rank().to_numpy()
+        rb = pd.Series(b).rank().to_numpy()
+        if ra.std() == 0 or rb.std() == 0:
+            return np.nan
+        return float(np.corrcoef(ra, rb)[0, 1])
+
+    print(f"\n  {'channel':<12}{'xs-IC':>8}{'xs-std':>8}{'ICIR':>7}{'days':>7}"
+          f"  (>= {min_names} names/day)")
+    for i, nm in enumerate(["upside", "downside"]):
+        df = pd.DataFrame({"d": dates, "p": preds[:, i], "t": trues[:, i]})
+        ics = []
+        for _, g in df.groupby("d"):
+            if len(g) >= min_names:
+                ic = _spearman(g["p"].to_numpy(), g["t"].to_numpy())
+                if np.isfinite(ic):
+                    ics.append(ic)
+        ics = np.array(ics)
+        mu, sd = np.nanmean(ics), np.nanstd(ics)
+        icir = mu / sd if sd > 0 else float("nan")
+        print(f"  {nm:<12}{mu:>8.3f}{sd:>8.3f}{icir:>7.2f}{len(ics):>7}")
+    print(f"\n  xs-IC = daily cross-sectional rank IC (Spearman); "
+          f"ICIR = mean/std over days.")
+
+
+def _range_fold_ic(preds, trues, dates, pred_len):
+    """Return a dict of pooled + cross-sectional IC for one fold's test set."""
+    import pandas as pd
+
+    def _ic(a, b):
+        a, b = a.ravel(), b.ravel()
+        m = np.isfinite(a) & np.isfinite(b)
+        return float(np.corrcoef(a[m], b[m])[0, 1]) if m.sum() > 3 else float("nan")
+
+    def _xs(i, min_names=10):
+        df = pd.DataFrame({"d": dates, "p": preds[:, i], "t": trues[:, i]})
+        ics = []
+        for _, g in df.groupby("d"):
+            if len(g) >= min_names and g["p"].std() and g["t"].std():
+                ra, rb = g["p"].rank().to_numpy(), g["t"].rank().to_numpy()
+                ics.append(np.corrcoef(ra, rb)[0, 1])
+        return float(np.nanmean(ics)) if ics else float("nan")
+
+    return {
+        "n": len(preds),
+        "up_ic": _ic(preds[:, 0], trues[:, 0]),
+        "dn_ic": _ic(preds[:, 1], trues[:, 1]),
+        "net_ic": _ic(preds[:, 0] + preds[:, 1], trues[:, 0] + trues[:, 1]),
+        "xs_up": _xs(0),
+        "xs_dn": _xs(1),
+    }
+
+
+def _cmd_range_walkforward(args, tickers):
+    """Walk-forward on the range target: repeat train+eval over consecutive
+    test blocks (expanding train window) and report mean ± std. LightGBM only."""
+    import pandas as pd
+
+    if args.model != "LightGBM":
+        raise SystemExit(
+            "Walk-forward range is LightGBM-only for now (neural training per "
+            "fold is expensive). Use --folds 1 for the neural single-split.")
+
+    from forecasting import lightgbm_runner as R
+
+    csv_path = os.path.join(args.data_root, f"{tickers[0]}.csv")
+    dates = pd.read_csv(csv_path)["Date"].tolist()
+    if args.start_date:
+        dates = [d for d in dates if d >= args.start_date]
+    needed = (args.folds + 1) * args.test_size + args.seq_len + args.pred_len
+    if len(dates) < needed:
+        raise SystemExit(
+            f"Not enough data: {len(dates)} rows but {args.folds} folds of "
+            f"--test_size {args.test_size} need ~{needed}.")
+    folds = _build_folds(dates, args.folds, args.test_size)
+
+    print(f"\n{'#' * 64}")
+    print(f"  RANGE WALK-FORWARD — LightGBM | {len(tickers)} ticker(s) | "
+          f"{args.folds} folds x {args.test_size} days")
+    print(f"{'#' * 64}")
+
+    rows = []
+    for f in folds:
+        print(f"\n  Fold {f['fold']}/{args.folds}  train<={f['train_end_date']}  "
+              f"val<={f['val_end_date']}  test<={f['end_date']}")
+        fc = R.train_pooled_range(
+            tickers, args.data_root, args.seq_len, args.pred_len,
+            start_date=args.start_date, train_end_date=f["train_end_date"],
+            val_end_date=f["val_end_date"])
+        preds, trues, d = R.evaluate_range_pooled(
+            tickers, args.data_root, fc, start_date=args.start_date,
+            train_end_date=f["train_end_date"], val_end_date=f["val_end_date"],
+            end_date=f["end_date"])
+        m = _range_fold_ic(preds, trues, d, args.pred_len)
+        rows.append(m)
+        print(f"    up_ic={m['up_ic']:.3f}  dn_ic={m['dn_ic']:.3f}  "
+              f"net_ic={m['net_ic']:.3f}  xs_up={m['xs_up']:.3f}  "
+              f"xs_dn={m['xs_dn']:.3f}  (n={m['n']})")
+
+    print(f"\n{'=' * 64}\n  SUMMARY (mean ± std over {args.folds} folds)\n{'=' * 64}")
+    for key, label in [("up_ic", "upside IC"), ("dn_ic", "downside IC"),
+                       ("net_ic", "net IC"), ("xs_up", "xs-IC upside"),
+                       ("xs_dn", "xs-IC downside")]:
+        vals = np.array([r[key] for r in rows], dtype=float)
+        print(f"  {label:<16}{np.nanmean(vals):>8.3f}  ± {np.nanstd(vals):.3f}")
+    return rows
 
 
 def cmd_walkforward(args):
@@ -581,53 +630,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_range.add_argument("--batch_size", type=int, default=256)
     p_range.add_argument("--lr", type=float, default=2e-4)
     p_range.add_argument("--patience", type=int, default=15)
-
-    # --- meta-label ---
-    p_meta = subparsers.add_parser("meta-label", help="Generate triple-barrier meta-labels")
-    p_meta.add_argument("--ticker", type=str, default="AAPL")
-    p_meta.add_argument("--model", type=str, default="LightGBM",
-                        choices=["LightGBM", "TimesNet", "TimeMixer", "StockMixer"],
-                        help="Primary forecaster whose predictions to label")
-    p_meta.add_argument("--seq_len", type=int, default=30)
-    p_meta.add_argument("--pred_len", type=int, default=5)
-    p_meta.add_argument("--data_root", type=str, default=DATA_ROOT)
-    p_meta.add_argument("--ma_targets", nargs="*", default=None)
-
-    # --- train-meta ---
-    p_tmeta = subparsers.add_parser("train-meta", help="Train the meta-classifier")
-    p_tmeta.add_argument("--ticker", type=str, default="AAPL")
-    p_tmeta.add_argument("--model", type=str, default="LightGBM",
-                         choices=["LightGBM", "TimesNet", "TimeMixer", "StockMixer"],
-                         help="Primary forecaster whose meta-labels to train on")
-    p_tmeta.add_argument("--threshold", type=float, default=0.5)
-
-    # --- evaluate ---
-    p_eval = subparsers.add_parser("evaluate", help="Evaluate meta-labeling precision lift")
-    p_eval.add_argument("--ticker", type=str, default="AAPL")
-    p_eval.add_argument("--model", type=str, default="LightGBM",
-                        choices=["LightGBM", "TimesNet", "TimeMixer", "StockMixer"],
-                        help="Primary forecaster whose meta-predictions to evaluate")
-    p_eval.add_argument("--threshold", type=float, default=0.5)
-
-    # --- run-all ---
-    p_all = subparsers.add_parser("run-all",
-                                   help="Run full pipeline (train→test→meta→evaluate)")
-    add_common_args(p_all)
-    p_all.add_argument("--epochs", type=int, default=200)
-    p_all.add_argument("--batch_size", type=int, default=32)
-    p_all.add_argument("--lr", type=float, default=2e-4)
-    p_all.add_argument("--patience", type=int, default=30,
-                       help="Early stopping patience (epochs without improvement)")
-    p_all.add_argument("--alpha", type=float, default=0.1,
-                       help="Rank-loss weight (StockMixer only). "
-                            "0.0 disables the rank term, paper default is 0.1.")
-    p_all.add_argument("--market_dim", type=int, default=2,
-                       help="Cross-stock hidden dimension m (StockMixer only). "
-                            "Default 2 chosen from ablation on our 5-ticker universe; "
-                            "paper uses 20 for NASDAQ.")
-    p_all.add_argument("--seed", type=int, default=42,
-                       help="Random seed for reproducibility (StockMixer only).")
-    p_all.add_argument("--threshold", type=float, default=0.5)
+    # Walk-forward: >1 fold repeats train+eval over consecutive test blocks
+    # (expanding train window) and reports mean ± std. LightGBM only for now.
+    p_range.add_argument("--folds", type=int, default=1,
+                         help="Walk-forward folds (1 = single split, the default).")
+    p_range.add_argument("--test_size", type=int, default=126,
+                         help="Trading days per test (and val) block; 126 ~ 6 months.")
 
     return parser
 
@@ -646,10 +654,6 @@ def main():
         "range": cmd_range,
         "walkforward": cmd_walkforward,
         "test": cmd_test,
-        "meta-label": cmd_meta_label,
-        "train-meta": cmd_train_meta,
-        "evaluate": cmd_evaluate,
-        "run-all": cmd_run_all,
     }
     commands[args.command](args)
 

@@ -121,95 +121,34 @@ class LightGBMForecaster:
 
     def engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Create tabular features from an OHLCV DataFrame.
+        Select the canonical causal feature set (see :mod:`features`).
 
-        All features are backward-looking (no future leakage).  Most are
-        scale-invariant (ratios, returns, bounded oscillators) so the
-        model generalises across different price levels.
+        The features are the single source of truth shared with the neural
+        models, so the comparison is on identical inputs. They are normally
+        pre-computed in the ticker CSV; if a caller passes a bare OHLCV frame
+        we derive them on the fly.
 
         Args:
-            df: DataFrame with at least Open, High, Low, Close, Volume.
+            df: DataFrame with the :data:`features.FEATURE_COLUMNS` columns, or
+                at least ``Open, High, Low, Close, Volume`` to derive them.
 
         Returns:
-            DataFrame of engineered features aligned to the same index.
+            DataFrame of features aligned positionally to ``df``.
         """
-        feat = pd.DataFrame(index=df.index)
+        from features import FEATURE_COLUMNS, add_features
 
-        close = df["Close"]
-        high = df["High"]
-        low = df["Low"]
-        open_ = df["Open"]
-        volume = df["Volume"]
+        if not set(FEATURE_COLUMNS).issubset(df.columns):
+            df = add_features(df, drop_warmup=False)
+        # Raw OHLCV + the canonical features — the same columns the neural nets
+        # receive, so the LightGBM-vs-neural comparison is on identical inputs.
+        cols = ["Open", "High", "Low", "Close", "Volume"] + list(FEATURE_COLUMNS)
+        feat = df[cols].copy()
 
-        # -- Returns at key lags --
-        for lag in [1, 2, 3, 5, 10, 20]:
-            feat[f"ret_{lag}d"] = close.pct_change(lag)
-
-        # -- Intraday price ratios --
-        feat["high_close_ratio"] = high / close
-        feat["low_close_ratio"] = low / close
-        feat["open_close_ratio"] = open_ / close
-        feat["high_low_range"] = (high - low) / close
-
-        # -- Volume dynamics --
-        feat["vol_change_1d"] = volume.pct_change(1)
-        feat["vol_change_5d"] = volume.pct_change(5)
-        vol_ma20 = volume.rolling(20, min_periods=1).mean()
-        feat["vol_ma_ratio"] = volume / vol_ma20.replace(0, np.nan)
-
-        # -- Rolling return statistics --
-        rets = close.pct_change()
-        for w in [5, 10, 20]:
-            feat[f"ret_mean_{w}d"] = rets.rolling(w, min_periods=w).mean()
-            feat[f"ret_std_{w}d"] = rets.rolling(w, min_periods=w).std()
-
-        # -- Price position within recent range --
-        for w in [10, 20]:
-            roll_high = high.rolling(w, min_periods=w).max()
-            roll_low = low.rolling(w, min_periods=w).min()
-            denom = (roll_high - roll_low).replace(0, np.nan)
-            feat[f"price_pos_{w}d"] = (close - roll_low) / denom
-
-        # -- RSI (14) --
-        delta = close.diff()
-        gain = delta.clip(lower=0)
-        loss_val = (-delta).clip(lower=0)
-        avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
-        avg_loss = loss_val.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        feat["rsi"] = 100.0 - (100.0 / (1.0 + rs))
-
-        # -- MACD (12, 26, 9) --
-        ema12 = close.ewm(span=12, adjust=False).mean()
-        ema26 = close.ewm(span=26, adjust=False).mean()
-        feat["macd"] = (ema12 - ema26) / close
-        feat["macd_signal"] = feat["macd"].ewm(span=9, adjust=False).mean()
-        feat["macd_hist"] = feat["macd"] - feat["macd_signal"]
-
-        # -- ATR (14), normalised --
-        prev_close = close.shift(1)
-        tr = pd.concat(
-            [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
-            axis=1,
-        ).max(axis=1)
-        feat["atr"] = tr.rolling(14, min_periods=14).mean() / close
-
-        # -- Bollinger Band width --
-        sma20 = close.rolling(20, min_periods=20).mean()
-        std20 = close.rolling(20, min_periods=20).std()
-        feat["bb_width"] = (2 * std20) / sma20.replace(0, np.nan)
-
-        # -- Vwap / Transactions (when available) --
-        if "Vwap" in df.columns:
-            feat["vwap_ratio"] = df["Vwap"] / close
-        if "Transactions" in df.columns:
-            txn = df["Transactions"].replace(0, np.nan)
-            feat["txn_change"] = df["Transactions"].pct_change(1)
-            feat["avg_trade_size"] = volume / txn
-
-        # -- Day of week (when Date column exists) --
-        if "Date" in df.columns:
-            feat["day_of_week"] = pd.to_datetime(df["Date"]).dt.dayofweek
+        # Optional cross-sectional / market context (panel add-on, opt-in).
+        from features_cross import CROSS_FEATURE_COLUMNS
+        for col in CROSS_FEATURE_COLUMNS:
+            if col in df.columns:
+                feat[col] = df[col].values
 
         return feat
 

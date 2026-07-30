@@ -11,7 +11,12 @@ from paths import CHECKPOINTS_ROOT, forecaster_checkpoint
 from utils import calculate_return_metrics
 
 from forecasting.data_loading import load_raw_df
+from features_cross import add_cross_sectional_features
 
+
+# ======================================================================
+# PRICE mode (legacy: predict next-pred_len High & Close as per-step returns).
+# ======================================================================
 
 def train_one(ticker: str, data_root: str, ma_targets: List[str],
               seq_len: int, pred_len: int,
@@ -101,11 +106,6 @@ def evaluate(ticker: str, data_root: str, ma_targets: List[str],
              ) -> Tuple[np.ndarray, np.ndarray, List[str], Dict[str, dict]]:
     """Load a saved forecaster and predict on the test window.
 
-    Slicing matches what meta/generate.py expects:
-        preds_full[j] corresponds to df row (seq_len + j).
-        Test sample i has entry bar (val_end + i + seq_len - 1),
-        so j = val_end + i - 1; test predictions start at j = val_end - 1.
-
     Returns ``(preds, trues, target_features, eval_results)`` — mirroring
     ``pytorch_runner.evaluate``. ``eval_results`` holds the return-based
     IC / RIC / DA metrics (overall and per target), reconstructed from the
@@ -155,14 +155,25 @@ def train_pooled_range(tickers: List[str], data_root: str,
                        seq_len: int, pred_len: int,
                        start_date: str | None = None,
                        train_end_date: str | None = None,
-                       val_end_date: str | None = None) -> LightGBMForecaster:
+                       val_end_date: str | None = None,
+                       end_date: str | None = None) -> LightGBMForecaster:
     """Train pooled upside/downside regressors (vol-normalised range target)."""
-    train_dfs, val_dfs = [], []
+    # Load every ticker's full history first, add panel-level cross-sectional
+    # features (causal), then slice — so each ticker carries its universe
+    # context columns into per-ticker feature engineering.
+    full_dfs, bounds = [], []
     for t in tickers:
         df, train_end, val_end, _ = load_raw_df(
-            t, data_root, ma_targets=[], start_date=start_date,
+            t, data_root, ma_targets=[], start_date=start_date, end_date=end_date,
             train_end_date=train_end_date, val_end_date=val_end_date,
         )
+        full_dfs.append(df)
+        bounds.append((train_end, val_end))
+    if os.environ.get("RANGE_WITH_CROSS") == "1":
+        full_dfs = add_cross_sectional_features(full_dfs, tickers)
+
+    train_dfs, val_dfs = [], []
+    for df, (train_end, val_end) in zip(full_dfs, bounds):
         train_dfs.append(df.iloc[:train_end].copy())
         val_dfs.append(df.iloc[train_end:val_end].copy())
 
@@ -179,22 +190,36 @@ def train_pooled_range(tickers: List[str], data_root: str,
 def evaluate_range_pooled(tickers: List[str], data_root: str, fc: LightGBMForecaster,
                           start_date: str | None = None,
                           train_end_date: str | None = None,
-                          val_end_date: str | None = None
-                          ) -> Tuple[np.ndarray, np.ndarray]:
-    """Predict the test window for every ticker; return pooled (preds, trues)
-    arrays of shape [N, 2] with channels [upside, downside] (vol-normalised)."""
-    P, T = [], []
+                          val_end_date: str | None = None,
+                          end_date: str | None = None
+                          ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Predict the test window for every ticker; return pooled (preds, trues,
+    dates) arrays. ``end_date`` bounds the test block (walk-forward folds)."""
+    # Same panel step as training: cross-sectional context is computed on the
+    # full universe, then each ticker is predicted from its enriched df.
+    full_dfs, val_ends = [], []
     for t in tickers:
         df, _train_end, val_end, _ = load_raw_df(
-            t, data_root, ma_targets=[], start_date=start_date,
+            t, data_root, ma_targets=[], start_date=start_date, end_date=end_date,
             train_end_date=train_end_date, val_end_date=val_end_date,
         )
+        full_dfs.append(df)
+        val_ends.append(val_end)
+    if os.environ.get("RANGE_WITH_CROSS") == "1":
+        full_dfs = add_cross_sectional_features(full_dfs, tickers)
+
+    P, T, D = [], [], []
+    for df, val_end in zip(full_dfs, val_ends):
         preds, _anchor, _sigma = fc.predict_range(df)
         trues = fc.range_ground_truth(df)
         n_test = (len(df) - val_end) - fc.seq_len - fc.pred_len + 1
         if n_test <= 0:
             continue
+        # Dates aligned to preds: predict_range covers df rows
+        # [seq_len : len(df)-pred_len]; the test window starts at s.
+        dates = df["Date"].to_numpy()[fc.seq_len:len(df) - fc.pred_len]
         s = val_end - 1
         P.append(preds[s:s + n_test])
         T.append(trues[s:s + n_test])
-    return np.concatenate(P), np.concatenate(T)
+        D.append(dates[s:s + n_test])
+    return np.concatenate(P), np.concatenate(T), np.concatenate(D)

@@ -126,13 +126,17 @@ class StockDataset(Dataset):
                     f"Available: {list(self.MA_CONFIGS.keys())}"
                 )
         
-        # Validate target features are in input features
-        for tf in self.target_features:
-            if tf not in self.input_features:
-                raise ValueError(f"Target feature '{tf}' must be in input_features")
-        
-        # Get indices of target features within input features
-        self.target_indices = [self.input_features.index(tf) for tf in self.target_features]
+        # Validate target features are in input features. Skipped in range
+        # mode: the range targets (upside/downside) are computed from raw
+        # High/Low/Close, not read from an input column, so they need not — and
+        # must not — be in the scale-invariant input feature set.
+        if self.target_mode != "range":
+            for tf in self.target_features:
+                if tf not in self.input_features:
+                    raise ValueError(f"Target feature '{tf}' must be in input_features")
+            self.target_indices = [self.input_features.index(tf) for tf in self.target_features]
+        else:
+            self.target_indices = []
         
         # Split ratios
         self.train_ratio = train_ratio
@@ -268,9 +272,11 @@ class StockDataset(Dataset):
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
 
-        # unscaled Close for return-targets mode and inverse transforms
-        close_col_idx = self.input_features.index('Close')
-        self.raw_close = df_input.iloc[border1:border2, close_col_idx].values.astype(np.float64)
+        # unscaled Close for return-targets mode and inverse transforms.
+        # Read from df_raw (not df_input) so 'Close' need not be an input
+        # feature — the canonical feature set is scale-invariant and omits
+        # raw OHLCV, matching what LightGBM consumes.
+        self.raw_close = df_raw['Close'].values[border1:border2].astype(np.float64)
 
         # Range mode needs raw High/Low (for the forward-avg band) and sigma
         # (volatility_20) for vol-normalisation, sliced to the same split.
@@ -393,6 +399,10 @@ class StockDataset(Dataset):
         - Price targets (High, Close) → their exact input column index.
         - MA targets (EMA_20, SMA_50) → Close column index (same scale).
         """
+        # Range mode outputs vol-normalised returns; denormalisation is skipped,
+        # so the mapping is unused and Close need not be an input column.
+        if self.target_mode == "range":
+            return tuple(0 for _ in self.target_features)
         close_idx = self.input_features.index('Close')
         indices = []
         for tf in self.target_features:
