@@ -1,13 +1,16 @@
-# Stock Price Forecasting & Meta-Labeling Trading Pipeline
+# Stock Forecasting Pipeline — Volatility-Normalised Range Prediction
 
-![Python](https://img.shields.io/badge/Python-3.12-blue)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.6-orange)
+![Python](https://img.shields.io/badge/Python-3.9-blue)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.8-orange)
 ![LightGBM](https://img.shields.io/badge/LightGBM-4.6-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**ENS 491/492 - Graduation Project** | **Sabanci University**
+**ENS 491/492 — Graduation Project** | **Sabanci University**
 
-A two-stage algorithmic trading pipeline that combines **neural time-series forecasting** with **meta-labeling** (Lopez de Prado) to filter trade signals and improve precision. Trained on a **pooled dataset of 5 major tech stocks** (AAPL, MSFT, GOOGL, NVDA, META) using return-based prediction.
+A research pipeline that forecasts a **volatility-normalised upside/downside
+band** for each stock over a short horizon, and compares gradient boosting
+against neural time-series models on **identical inputs**. Trained on a **pooled
+panel of 78 NASDAQ-100 stocks** (Yahoo daily OHLCV, 2015–2025).
 
 ## Project Team
 
@@ -19,185 +22,177 @@ A two-stage algorithmic trading pipeline that combines **neural time-series fore
 
 **Supervisor:** Mehmet Emre Ozfatura
 
-## Pipeline Overview
+## What it predicts
+
+Instead of predicting the (near-unpredictable) future price or its direction, the
+model predicts **how far a stock swings up and down** over the next `H` days,
+measured in units of its own recent volatility:
 
 ```
-Raw Minute Bars (Parquet)
-        |
-        v
-  resample_parquet.py          Data Cleaning (RTH filter, drop weekends/holidays)
-        |
-        v
-  5 Ticker CSVs                AAPL, MSFT, GOOGL, NVDA, META (2022+)
-  (849-941 daily bars each)
-        |
-   +---------+---------+
-   |         |         |
-TimesNet  TimeMixer  LightGBM   Stage 1: Price Forecasting
-   |         |         |         (return-based targets, pooled training)
-   +---------+---------+
-        |
-        v
-  Triple Barrier Method        Stage 2: Meta-Labeling
-        |
-        v
-  Feature Engineering           (ATR, RSI, MACD, volatility)
-        |
-        v
-  LightGBM Meta-Classifier     Signal Filter (Purged K-Fold CV)
-        |
-        v
-  Filtered Trade Signals        Precision: 66% -> 90%
+upside[t]   = ( mean(High[t+1..t+H]) - Close[t] ) / Close[t] / sigma[t]
+downside[t] = ( mean(Low [t+1..t+H]) - Close[t] ) / Close[t] / sigma[t]
+sigma[t]    = volatility_20  (std of the last 20 daily log-returns, known at t)
 ```
 
-## Key Results
+Two channels (`upside`, `downside`), forward-averaged over `H = 5` days, anchored
+to the current Close, and divided by `sigma` — a *scaling*, not a *shift*, so it
+injects no look-ahead. This band is the natural input to a triple-barrier trading
+rule (upper = upside, lower = downside).
 
-### Stage 1 — Pooled TimeMixer (5-day horizon, return-based prediction)
+## Pipeline overview
 
-| Ticker | MAE ($) | IC | RIC | DA |
-|--------|---------|-------|-------|-------|
-| AAPL | 4.73 | 0.163 | 0.173 | 64.2% |
-| GOOGL | 4.50 | **0.189** | **0.205** | 70.9% |
-| NVDA | **3.87** | 0.091 | 0.121 | 70.9% |
-| MSFT | 6.85 | 0.106 | 0.181 | **72.7%** |
-| META | 14.41 | 0.145 | 0.183 | 63.3% |
+```
+Yahoo daily OHLCV (fetch)         78 NASDAQ-100 tickers, 2015-2025
+        |
+        v
+  features.py                     Canonical causal feature set (12) + raw OHLCV
+        |                         -> the SAME 17 columns for every model
+        v
+   +----------+-----------+----------+
+   |          |           |          |
+ LightGBM  TimeMixer   TimesNet   StockMixer      Stage-1: band forecast
+   |          |           |          |            (StockMixer = cross-stock,
+   +----------+-----------+----------+             return-ranking variant)
+        |
+        v
+  IC / cross-sectional IC / walk-forward          Honest evaluation
+```
 
-> IC = Information Coefficient (Pearson), RIC = Rank IC (Spearman), DA = Directional Accuracy
+## Latest results (reference baseline)
 
-### Stage 2 — Meta-Labeling (Signal Filtering)
+**LightGBM**, range target, 78 tickers, `start_date=2015-01-01`. These are the
+current numbers — kept here as a baseline to compare future changes against.
 
-| Metric | Baseline | Filtered | Change |
-|--------|----------|----------|--------|
-| Precision | 66.0% | **89.7%** | **+23.7 pp** |
-| F1 Score | 79.5% | **89.7%** | +10.2 pp |
-| Sharpe Ratio | -0.52 | **6.62** | -- |
-| PSR | 36.9% | **99.8%** | -- |
+**Single split** (train ≤ 2023-11-24, val ≤ 2024-05-28, test n = 26,832):
 
-## Project Structure
+| Channel | IC | IC (non-overlap) | cross-sectional IC | ICIR |
+|---|---|---|---|---|
+| upside | **0.127** | 0.105 | **0.120** | 0.59 |
+| downside | 0.110 | 0.122 | 0.097 | 0.44 |
+| net (up+dn) | 0.044 | 0.025 | — | — |
+
+**Walk-forward** (4 folds × 126 days, expanding train window; mean ± std):
+
+| Channel | IC | cross-sectional IC |
+|---|---|---|
+| upside | **0.128 ± 0.024** | 0.123 ± 0.028 |
+| downside | 0.098 ± 0.036 | 0.076 ± 0.035 |
+| net | 0.036 ± 0.027 | — |
+
+Upside IC is positive in all four folds — the signal is real and regime-robust,
+not a single-split artifact. The band *magnitude* is what carries skill; net
+up/down *direction* sits at the base rate (~53% DA).
+
+> IC = Pearson corr(pred, true) pooled over stock-days. Cross-sectional IC = daily
+> Spearman rank corr across stocks, averaged over days. ICIR = mean/std over days.
+> Feature set: unified 17 columns (see below). Neural models (TimeMixer / TimesNet)
+> on the unified features: comparison run pending.
+
+## Project structure
 
 ```
 stockportfolio_project/
-├── main.py                          # Unified entry point (train/test/meta/run-all)
+├── main.py                          # Unified CLI: fetch / train / test / walkforward / range
 ├── src/
-│   ├── dataset.py                   # ParquetDataset (PyTorch Dataset, multi-ticker)
-│   ├── train.py                     # Training script (single/pooled multi-ticker)
-│   ├── test.py                      # Evaluation script (per-ticker metrics)
-│   ├── train_meta.py                # Meta-classifier training
-│   ├── train_hybrid.py              # Hybrid model training
-│   ├── utils.py                     # Metrics (MSE/MAE/IC/RIC/DA), early stopping
+│   ├── features.py                  # Canonical causal feature set (single source of truth)
+│   ├── features_cross.py            # Optional cross-sectional/market features (opt-in)
+│   ├── dataset.py                   # StockDataset (PyTorch, per-ticker sequences)
+│   ├── dataset_crossstock.py        # Cross-stock dataset (StockMixer)
+│   ├── paths.py                     # Filesystem locations
+│   ├── utils.py / reporting.py      # Metrics + reporting
+│   ├── forecasting/
+│   │   ├── lightgbm_runner.py       # LightGBM: price + range train/eval
+│   │   ├── pytorch_runner.py        # TimeMixer / TimesNet train/eval
+│   │   ├── crossstock_runner.py     # StockMixer train/eval
+│   │   └── data_loading.py          # Shared CSV loading + splits
 │   ├── models/
-│   │   ├── TimeMixer/               # MLP-based multi-scale mixing
-│   │   ├── TimesNet/                # CNN-based temporal 2D variation
-│   │   ├── LightGBMForecaster/      # GBDT with return-based prediction
-│   │   └── meta_classifier/         # LightGBM binary classifier
-│   ├── trading_logic/
-│   │   ├── triple_barrier.py        # Triple Barrier Method (labeling)
-│   │   ├── purged_cv.py             # Purged K-Fold cross-validation
-│   │   └── evaluation.py            # Precision, F1, PSR metrics
+│   │   ├── LightGBMForecaster/      # GBDT forecaster
+│   │   ├── TimeMixer/  TimesNet/    # Neural forecasters
+│   │   └── StockMixer/              # Cross-stock model
 │   └── scripts/
-│       ├── resample_parquet.py      # Minute bars -> clean daily bars
-│       └── generate_meta_labels.py  # Feature engineering bridge
-├── data/
-│   ├── raw/                         # Resampled daily CSVs (5 tickers)
-│   └── meta/                        # Meta-labels and predictions
-└── docs/
-    └── RESULTS_REPORT.md            # Full results report
+│       └── fetch_data.py            # Yahoo daily OHLCV downloader + feature engineering
+└── data/raw/                        # One CSV per ticker (gitignored)
 ```
 
-## Quick Start
+## Quick start
 
 ### 1. Setup
 
 ```bash
 git clone https://github.com/grkmgllr/stockportfolio_project.git
 cd stockportfolio_project
-python -m venv venv
-source venv/bin/activate       # Linux/Mac
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install torch --index-url https://download.pytorch.org/whl/cu128   # or CPU build
 ```
 
-### 2. Data Preparation
-
-Place your minute-bar parquet files in `data/raw/`, then resample:
+### 2. Fetch data
 
 ```bash
-python src/scripts/resample_parquet.py --ticker AAPL --start_date 2022-01-01
-python src/scripts/resample_parquet.py --all   # All 5 tickers
+# The 78-ticker universe:
+python main.py fetch --tickers $(cat experiments/tickers.txt) --start 2015-01-01 --end 2025-11-30
+# Or a few names:
+python main.py fetch --tickers AAPL MSFT GOOGL NVDA META
 ```
 
-### 3. Train & Test Models
-
-**Pooled multi-ticker training (recommended):**
+### 3. Range band forecast (the current target)
 
 ```bash
-# Train on all 5 tickers simultaneously
-python train.py --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META \
-                --seq_len 30 --pred_len 5 --epochs 200 --lr 0.0002
+# Train + evaluate in one call (LightGBM ~1 min, no GPU):
+python main.py range --model LightGBM  --tickers $(cat experiments/tickers.txt) --start_date 2015-01-01
 
-# Evaluate per-ticker
-python test.py --model TimeMixer --tickers AAPL MSFT GOOGL NVDA META \
-               --seq_len 30 --pred_len 5
+# Neural (GPU recommended):
+python main.py range --model TimeMixer --tickers $(cat experiments/tickers.txt) --start_date 2015-01-01 --epochs 40 --batch_size 256
+
+# Walk-forward (credible model comparison):
+python main.py range --model LightGBM  --tickers $(cat experiments/tickers.txt) --start_date 2015-01-01 --folds 4 --test_size 126
 ```
 
-**Single-ticker training:**
+Cross-sectional/market features are opt-in: prefix with `RANGE_WITH_CROSS=1`.
+
+### 4. Legacy price forecast (kept for comparison)
 
 ```bash
-python main.py train --model TimeMixer --ticker AAPL --seq_len 30 --pred_len 5 --epochs 100
-python main.py test  --model TimeMixer --ticker AAPL --seq_len 30 --pred_len 5
-```
-
-**Full pipeline:**
-
-```bash
-python main.py run-all --model TimeMixer --ticker AAPL  # train+test+meta in one command
-```
-
-### 4. Meta-Labeling Pipeline
-
-```bash
-python main.py meta-label --ticker AAPL --seq_len 30 --pred_len 5
-python main.py train-meta --ticker AAPL
-python main.py evaluate --ticker AAPL
+python main.py train --model TimeMixer --tickers AAPL MSFT GOOGL --seq_len 30 --pred_len 5 --epochs 200
+python main.py test  --model TimeMixer --tickers AAPL MSFT GOOGL
+python main.py train --model StockMixer --tickers AAPL MSFT GOOGL   # cross-stock model
 ```
 
 ## Models
 
-### TimeMixer
-Uses MLP-based multi-scale mixing with Past-Decomposable-Mixing blocks. Best performing model with **69K parameters** — achieves IC up to 0.189 and DA up to 72.7% across 5 tickers.
+- **LightGBM** — gradient-boosted trees on the flat feature row; the workhorse
+  (matches the neural nets at ~100× lower cost).
+- **TimeMixer** — MLP-based multi-scale mixing over the feature sequence.
+- **TimesNet** — 2D temporal-variation CNN ([Wu et al., 2023](https://arxiv.org/abs/2210.02186)).
+- **StockMixer** — cross-stock model that ranks stocks jointly (return-target variant).
 
-### TimesNet
-Transforms 1D time series into 2D tensors to capture intra-period and inter-period variations using CNNs. Based on [Wu et al., 2023](https://arxiv.org/abs/2210.02186). **2.3M parameters**.
+## Feature set (the single source of truth)
 
-### LightGBM Forecaster
-Gradient boosted decision trees with 31 hand-crafted features (returns, RSI, MACD, ATR, Bollinger width). Uses **return-based prediction** — predicts percentage returns from the anchor Close price.
+All models consume the **same 17 columns**: raw OHLCV (5) plus the canonical 12
+causal features in `features.py`:
 
-### Meta-Classifier
-A secondary LightGBM classifier trained on market-context features to filter the primary model's trade signals. Uses **Purged K-Fold** cross-validation to prevent data leakage.
+| Group | Features |
+|---|---|
+| Momentum | `ret_1d`, `ret_5d`, `ret_20d` |
+| Volatility | `volatility_20`, `atr`, `bb_width` |
+| Range structure | `high_close_ratio`, `low_close_ratio`, `high_low_range`, `price_pos_20d` |
+| Oscillator / volume | `rsi_14`, `vol_ma_ratio` |
 
-## Key Technical Decisions
-
-- **Return-based targets**: All models predict percentage returns instead of absolute prices. This improved TimeMixer MAE by 39.8% and enables cross-ticker generalization.
-- **Pooled multi-ticker training**: A single model is trained on all 5 tickers simultaneously via `ConcatDataset`. Return-based targets make this possible since all stocks are in the same scale.
-- **Post-COVID data only**: All data is filtered to 2022-01-01+ to avoid pandemic-era anomalies.
-- **Per-ticker evaluation**: Despite pooled training, test metrics are computed per-ticker to measure generalization.
-
-## Evaluation Metrics
+## Evaluation metrics
 
 | Metric | Description |
-|--------|-------------|
-| MAE / RMSE | Price error in dollars (after converting returns back to prices) |
-| IC | Information Coefficient — Pearson correlation between predicted and actual returns |
-| RIC | Rank IC — Spearman rank correlation (ordinal agreement) |
-| DA | Directional Accuracy — fraction of correct return sign predictions |
+|---|---|
+| IC | Pearson correlation between predicted and actual band, pooled over stock-days |
+| IC (non-overlap) | Same, on a non-overlapping (stride = `pred_len`) subsample — leakage sanity check |
+| Cross-sectional IC / ICIR | Daily Spearman rank IC across stocks, averaged; ICIR = mean/std over days |
+| Walk-forward mean ± std | The above, repeated over expanding-window folds (credible comparison) |
 
 ## References
 
 - Lopez de Prado, M. (2018). *Advances in Financial Machine Learning*. Wiley.
 - Wu, H., et al. (2023). "TimesNet: Temporal 2D-Variation Modeling for General Time Series Analysis." ICLR 2023.
-- Fan, J. & Shen, Y. (2024). Information Coefficient metrics for financial forecasting.
 - Ke, G., et al. (2017). "LightGBM: A Highly Efficient Gradient Boosting Decision Tree." NeurIPS 2017.
 
 ## License
 
-This project is open-source and available under the **MIT License**.
+Open-source under the **MIT License**.
