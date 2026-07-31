@@ -274,7 +274,8 @@ def cmd_range(args):
             start_date=args.start_date, train_end_date=args.train_end_date,
             val_end_date=args.val_end_date, target_mode="range",
         )
-        parts_p, parts_t = [], []
+        from forecasting.data_loading import load_raw_df
+        parts_p, parts_t, parts_d = [], [], []
         for t in tickers:
             p, tr = P.evaluate_range(
                 t, args.model, seq_len=args.seq_len, pred_len=args.pred_len,
@@ -282,29 +283,50 @@ def cmd_range(args):
                 start_date=args.start_date, train_end_date=args.train_end_date,
                 val_end_date=args.val_end_date,
             )
-            parts_p.append(p); parts_t.append(tr)
+            # Dates aligned exactly like the LightGBM path: neural test sample i
+            # and LightGBM test row i map to the same df date, so cross-sectional
+            # IC is computed on identical stock-day groupings across models.
+            df, _te, val_end, _ = load_raw_df(
+                t, args.data_root, ma_targets=[], start_date=args.start_date,
+                train_end_date=args.train_end_date, val_end_date=args.val_end_date,
+            )
+            d = df["Date"].to_numpy()[args.seq_len:len(df) - args.pred_len]
+            s = val_end - 1
+            d = d[s:s + len(p)]
+            parts_p.append(p); parts_t.append(tr); parts_d.append(d)
         preds, trues = np.concatenate(parts_p), np.concatenate(parts_t)
-        dates = None   # neural eval path does not yet track per-row dates
+        dates = np.concatenate(parts_d)
 
     def _ic(a, b):
         a, b = a.ravel(), b.ravel()
         m = np.isfinite(a) & np.isfinite(b)
         return float(np.corrcoef(a[m], b[m])[0, 1]) if m.sum() > 3 else float("nan")
 
+    def _err(p, t):
+        m = np.isfinite(p) & np.isfinite(t)
+        p, t = p[m], t[m]
+        mae = float(np.mean(np.abs(p - t)))
+        rmse = float(np.sqrt(np.mean((p - t) ** 2)))
+        base = float(np.mean(np.abs(t - t.mean())))   # predict-the-mean baseline
+        return mae, rmse, base
+
     idx = np.arange(0, len(preds), args.pred_len)   # non-overlap sanity
-    print(f"\n  {'channel':<12}{'IC':>8}{'IC_no':>8}{'DA%':>7}{'up%':>7}  (test n={len(preds)})")
-    for i, nm in enumerate(["upside", "downside"]):
-        p, t = preds[:, i], trues[:, i]
+    print(f"\n  {'channel':<12}{'IC':>8}{'IC_no':>8}{'MAE':>8}{'RMSE':>8}"
+          f"{'baseMAE':>9}{'DA%':>7}{'up%':>7}  (test n={len(preds)})")
+    chans = [("upside", preds[:, 0], trues[:, 0]),
+             ("downside", preds[:, 1], trues[:, 1]),
+             ("net(up+dn)", preds[:, 0] + preds[:, 1], trues[:, 0] + trues[:, 1])]
+    for nm, p, t in chans:
+        mae, rmse, base = _err(p, t)
         da = 100 * np.mean(np.sign(p) == np.sign(t)); up = 100 * np.mean(t > 0)
-        print(f"  {nm:<12}{_ic(p, t):>8.3f}{_ic(p[idx], t[idx]):>8.3f}{da:>7.1f}{up:>7.1f}")
-    np_, nt = preds[:, 0] + preds[:, 1], trues[:, 0] + trues[:, 1]
-    da = 100 * np.mean(np.sign(np_) == np.sign(nt)); up = 100 * np.mean(nt > 0)
-    print(f"  {'net(up+dn)':<12}{_ic(np_, nt):>8.3f}{_ic(np_[idx], nt[idx]):>8.3f}{da:>7.1f}{up:>7.1f}")
-    print(f"\n  upside IC = vol-adjusted 'more-than-expected upside' skill.")
+        print(f"  {nm:<12}{_ic(p, t):>8.3f}{_ic(p[idx], t[idx]):>8.3f}"
+              f"{mae:>8.3f}{rmse:>8.3f}{base:>9.3f}{da:>7.1f}{up:>7.1f}")
+    print(f"\n  upside IC = vol-adjusted 'more-than-expected upside' skill; "
+          f"baseMAE = predict-the-mean baseline.")
 
     # Cross-sectional IC: rank stocks against each other each day, then average
-    # the daily rank correlations. This is the metric that reflects "pick the
-    # right stock today" skill (and where cross-sectional features should show).
+    # the daily rank correlations — the "pick the right stock today" metric.
+    # Now computed for every model (LightGBM and neural) on identical groupings.
     if dates is not None:
         _cross_sectional_ic(preds, trues, dates)
 
