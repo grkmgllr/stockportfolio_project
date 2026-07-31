@@ -135,27 +135,37 @@ python main.py fetch --tickers $(cat experiments/tickers.txt) --start 2015-01-01
 python main.py fetch --tickers AAPL MSFT GOOGL NVDA META
 ```
 
-### 3. Range band forecast (the current target)
+### 3. Train & test (band forecast — the current target)
+
+`train` fits a model and saves a checkpoint; `test` loads it and prints the full
+metric table (IC, non-overlap IC, MAE, RMSE, baseMAE, DA%, up% per channel, plus
+cross-sectional IC/ICIR). Same interface for every model.
 
 ```bash
-# Train + evaluate in one call (LightGBM ~1 min, no GPU):
-python main.py range --model LightGBM  --tickers $(cat experiments/tickers.txt) --start_date 2015-01-01
+TICKERS=$(cat experiments/tickers.txt)
+
+# LightGBM (~1 min, no GPU):
+python main.py train --model LightGBM  --tickers $TICKERS
+python main.py test  --model LightGBM  --tickers $TICKERS
 
 # Neural (GPU recommended):
-python main.py range --model TimeMixer --tickers $(cat experiments/tickers.txt) --start_date 2015-01-01 --epochs 40 --batch_size 256
+python main.py train --model TimeMixer --tickers $TICKERS --epochs 40 --batch_size 256
+python main.py test  --model TimeMixer --tickers $TICKERS
 
 # Walk-forward (credible model comparison):
-python main.py range --model LightGBM  --tickers $(cat experiments/tickers.txt) --start_date 2015-01-01 --folds 4 --test_size 126
+python main.py test  --model LightGBM  --tickers $TICKERS --folds 4 --test_size 126
 ```
 
-Cross-sectional/market features are opt-in: prefix with `RANGE_WITH_CROSS=1`.
+`--target range` is the default; the split dates default to
+`--train_end_date 2023-11-24 --val_end_date 2024-05-28`. Cross-sectional/market
+features are opt-in: prefix a command with `RANGE_WITH_CROSS=1`.
 
-### 4. Legacy price forecast (kept for comparison)
+### 4. Legacy price forecast (kept for comparison) — add `--target price`
 
 ```bash
-python main.py train --model TimeMixer --tickers AAPL MSFT GOOGL --seq_len 30 --pred_len 5 --epochs 200
-python main.py test  --model TimeMixer --tickers AAPL MSFT GOOGL
-python main.py train --model StockMixer --tickers AAPL MSFT GOOGL   # cross-stock model
+python main.py train --model TimeMixer --tickers AAPL MSFT GOOGL --target price --epochs 200
+python main.py test  --model TimeMixer --tickers AAPL MSFT GOOGL --target price
+python main.py train --model StockMixer --tickers AAPL MSFT GOOGL  # cross-stock (own path)
 ```
 
 ## Models
